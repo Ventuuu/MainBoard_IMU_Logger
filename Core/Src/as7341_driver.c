@@ -23,6 +23,8 @@ static void    as7341_select_regbank(uint8_t enable_bank1);
 static void    as7341_smux_apply(AS7341_SmuxCmd cmd);
 static void    as7341_smux_setup_F1F4_Clear_NIR(void);
 static void    as7341_smux_setup_F5F8_Clear_NIR(void);
+static void    as7341_smux_setup_FlickerPD(void);
+static uint16_t as7341_decode_flicker_mains(uint8_t fd_status);
 
 /* ---- Public Function Implementations ------------------------------------ */
 
@@ -132,6 +134,61 @@ uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum) {
     return 1;
 }
 
+uint16_t AS7341_DetectMainsHz(void) {
+    uint8_t enable = 0;
+    uint8_t status = 0;
+    uint32_t start = 0;
+
+    /* 1) Disable spectral & flicker, then enable power only. */
+    if (!as7341_read_register(AS7341_REG_ENABLE, &enable, 1U)) {
+        return 0U;
+    }
+
+    enable &= (uint8_t)~(AS7341_SP_EN | AS7341_FDEN | AS7341_SMUXEN);
+    enable |= AS7341_PON;
+    if (!as7341_write_register(AS7341_REG_ENABLE, enable)) {
+        return 0U;
+    }
+
+    /* 2) Configure SMUX chain for flicker PD (Adafruit FDConfig pattern). */
+    as7341_select_regbank(1U);
+    as7341_smux_setup_FlickerPD();
+    as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
+    as7341_select_regbank(0U);
+
+    /* 3) Set a modest flicker integration time and gain. These values
+     * are chosen to mirror Adafruit defaults sufficiently for mains
+     * detection (100/120 Hz). */
+    as7341_write_register(AS7341_REG_FD_TIME1, 0xFFU);
+    as7341_write_register(AS7341_REG_FD_TIME2, 0x03U);
+
+    /* 4) Enable spectral engine and flicker detection. */
+    if (!as7341_read_register(AS7341_REG_ENABLE, &enable, 1U)) {
+        return 0U;
+    }
+    enable |= (AS7341_SP_EN | AS7341_FDEN);
+    if (!as7341_write_register(AS7341_REG_ENABLE, enable)) {
+        return 0U;
+    }
+
+    /* 5) Wait for flicker measurement to complete. Datasheet suggests
+     * tens to hundreds of ms; we poll FD_STATUS for a bounded time. */
+    start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 300U) {
+        if (!as7341_read_register(AS7341_REG_FD_STATUS, &status, 1U)) {
+            return 0U;
+        }
+        /* If any flicker classification bits are set, decode and return. */
+        if (status != 0U) {
+            return as7341_decode_flicker_mains(status);
+        }
+        HAL_Delay(10U);
+    }
+
+    /* Timeout or no valid flicker detected. */
+    return 0U;
+}
+
 /* ---- Private Helper Implementations ------------------------------------ */
 
 static uint8_t as7341_read_register(uint8_t reg_addr, uint8_t *data, uint16_t len) {
@@ -238,4 +295,45 @@ static void as7341_smux_setup_F5F8_Clear_NIR(void) {
     as7341_write_register(0x11U, 0x50U); /* CLEAR right -> ADC4 */
     as7341_write_register(0x12U, 0x00U);
     as7341_write_register(0x13U, 0x06U); /* NIR -> ADC5 */
+}
+
+/* SMUX configuration for flicker PD, adapted from Adafruit_AS7341::FDConfig. */
+static void as7341_smux_setup_FlickerPD(void) {
+    as7341_write_register(0x00U, 0x00U);
+    as7341_write_register(0x01U, 0x00U);
+    as7341_write_register(0x02U, 0x00U);
+    as7341_write_register(0x03U, 0x00U);
+    as7341_write_register(0x04U, 0x00U);
+    as7341_write_register(0x05U, 0x00U);
+    as7341_write_register(0x06U, 0x00U);
+    as7341_write_register(0x07U, 0x00U);
+    as7341_write_register(0x08U, 0x00U);
+    as7341_write_register(0x09U, 0x00U);
+    as7341_write_register(0x0AU, 0x00U);
+    as7341_write_register(0x0BU, 0x00U);
+    as7341_write_register(0x0CU, 0x00U);
+    as7341_write_register(0x0DU, 0x00U);
+    as7341_write_register(0x0EU, 0x00U);
+    as7341_write_register(0x0FU, 0x00U);
+    as7341_write_register(0x10U, 0x00U);
+    as7341_write_register(0x11U, 0x00U);
+    as7341_write_register(0x12U, 0x00U);
+    as7341_write_register(0x13U, 0x60U); /* Flicker PD -> ADC5, matching Adafruit FDConfig */
+}
+
+/* Decode FD_STATUS into equivalent mains frequency classification. The
+ * exact bit mapping is device/firmware specific; this helper assumes the
+ * common convention where particular FD_STATUS codes indicate 100 Hz,
+ * 120 Hz, or unknown flicker types, mirroring Adafruit's
+ * Adafruit_AS7341::decodeFlickerDetectStatus behavior. */
+static uint16_t as7341_decode_flicker_mains(uint8_t fd_status) {
+    switch (fd_status) {
+        case 45: /* 100 Hz flicker detected */
+            return 50U;  /* 50 Hz mains */
+        case 46: /* 120 Hz flicker detected */
+            return 60U;  /* 60 Hz mains */
+        case 44: /* flicker, unknown frequency */
+        default:
+            return 0U;   /* treat as natural / non-mains */
+    }
 }
