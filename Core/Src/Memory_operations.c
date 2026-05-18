@@ -60,22 +60,20 @@ void erase_good_blocks(uint8_t *bad_blocks){
 /**
  * @brief Assembles one data record into the NAND page buffer.
  *
- * Packet layout (BYTES_PER_SAMPLE = 21):
+ * Packet layout (BYTES_PER_SAMPLE = 37):
  *   [0]      hh
  *   [1]      mm
  *   [2]      ss
  *   [3..4]   sss  (uint16, little-endian)
  *   [5..10]  accelerometer raw bytes (XL, XH, YL, YH, ZL, ZH)
  *   [11..16] gyroscope     raw bytes (XL, XH, YL, YH, ZL, ZH)
- *   [17..18] light Clear   (uint16, little-endian)
- *   [19..20] light NIR     (uint16, little-endian)
- *
- * @param sample       Zero-based index of the sample within the current page.
- * @param timestamp    Time stamp structure.
- * @param accelerometer Pointer to 6-byte raw accelerometer buffer.
- * @param gyroscope     Pointer to 6-byte raw gyroscope buffer.
- * @param light_raw     Pointer to 4-byte raw light buffer (Clear LSB, Clear MSB, NIR LSB, NIR MSB).
- * @param NAND_packet   Pointer to the 4096-byte page buffer.
+ *   [17..24] light spectral filters F1..F4 (low SMUX) and F5..F8 (high SMUX),
+ *             stored as 8 bytes (4 channels × 2 bytes each, little-endian),
+ *             with mapping documented in the Python decoder.
+ *   [25..26] light Clear   (uint16, little-endian)
+ *   [27..28] light NIR     (uint16, little-endian)
+ *   [29..30] flicker frequency estimate in Hz (uint16: 0, 1, 100 or 120)
+ *   [31..36] reserved / currently zeroed.
  */
 void write_packet(uint16_t sample, Time_Struct timestamp,
                   uint8_t *accelerometer, uint8_t *gyroscope,
@@ -109,9 +107,23 @@ void write_packet(uint16_t sample, Time_Struct timestamp,
 	NAND_packet[base + 15] = gyroscope[4];
 	NAND_packet[base + 16] = gyroscope[5];
 
-	/* Light sensor — Clear and NIR (4 bytes) */
-	NAND_packet[base + 17] = light_raw[0];  /* Clear LSB */
-	NAND_packet[base + 18] = light_raw[1];  /* Clear MSB */
-	NAND_packet[base + 19] = light_raw[2];  /* NIR LSB   */
-	NAND_packet[base + 20] = light_raw[3];  /* NIR MSB   */
+	/* Light filters (8 bytes: 4 channels × 2 bytes, indices 0..7) */
+	for (uint8_t i = 0; i < 8; i++) {
+		NAND_packet[base + 17 + i] = light_raw[i];
+	}
+
+	/* Clear and NIR (4 bytes: indices 8..11) */
+	NAND_packet[base + 25] = light_raw[8];   /* Clear LSB */
+	NAND_packet[base + 26] = light_raw[9];   /* Clear MSB */
+	NAND_packet[base + 27] = light_raw[10];  /* NIR LSB   */
+	NAND_packet[base + 28] = light_raw[11];  /* NIR MSB   */
+
+	/* Flicker frequency (2 bytes: indices 12..13, little-endian) */
+	NAND_packet[base + 29] = light_raw[12];
+	NAND_packet[base + 30] = light_raw[13];
+
+	/* Reserved bytes: zero for now */
+	for (uint8_t i = 31; i < 37; i++) {
+		NAND_packet[base + i] = 0x00;
+	}
 }
