@@ -2,15 +2,12 @@
  * \file as7341_driver.c
  * \brief Implementation of the AS7341 spectral light sensor driver.
  *
- * Uses hi2c3 (shared I2C bus with the IMU). Mirrors the coding style of
- * imu_driver.c for consistency within the project.
- *
- * Acquisition strategy:
- *   - ATIME = 29  -> 30 integration steps
- *   - ASTEP = 599 -> 600 us per step => total = 18 ms per measurement
- *   - AGAIN = 3   -> x8 gain (adjustable depending on light conditions)
- *   We poll AVALID before reading; if the bit is not set within the timeout,
- *   the previous sample is returned unchanged.
+ * Now supports two layers of API:
+ *   1) Legacy Clear+NIR-only readout (AS7341_ReadChannels) used by existing
+ *      logging code (4 bytes per sample for light).
+ *   2) Full-spectrum readout (AS7341_ReadFullSpectrum) using two SMUX
+ *      configurations inspired by the Adafruit AS7341 library to acquire
+ *      F1–F8 + Clear + NIR (12 channels).
  */
 
 #include "as7341_driver.h"
@@ -22,94 +19,121 @@ extern I2C_HandleTypeDef hi2c3;
 static uint8_t as7341_read_register(uint8_t reg_addr, uint8_t *data, uint16_t len);
 static uint8_t as7341_write_register(uint8_t reg_addr, uint8_t value);
 static uint8_t as7341_wait_avalid(uint32_t timeout_ms);
+static void    as7341_select_regbank(uint8_t enable_bank1);
+static void    as7341_smux_apply(AS7341_SmuxCmd cmd);
+static void    as7341_smux_setup_F1F4_Clear_NIR(void);
+static void    as7341_smux_setup_F5F8_Clear_NIR(void);
 
 /* ---- Public Function Implementations ------------------------------------ */
 
-/**
- * @brief Initializes the AS7341.
- *
- * Steps:
- *  1. Power on (PON).
- *  2. Set integration time: ATIME=29, ASTEP=599 -> ~18 ms per cycle.
- *  3. Set gain to x8 (AGAIN=3).
- *  4. Enable spectral measurement (SP_EN).
- *
- * @return 1 on success, 0 if device not responding.
- */
 uint8_t AS7341_Init(void) {
     uint8_t id = 0;
 
-    /* The AS7341 does not have a WHO_AM_I register in the traditional sense,
-     * but register 0x92 (ID register) should return 0x09 for AS7341. */
-    if (!as7341_read_register(0x92U, &id, 1) || (id & 0xFCU) != 0x24U) {
-        /* 0x92 returns 0x24 on AS7341-DLGT; mask lower 2 bits for revision */
+    /* WHOAMI/ID check: register 0x92 should return 0x09 (Adafruit) or 0x24 w/ rev bits. */
+    if (!as7341_read_register(0x92U, &id, 1)) {
         return 0;
     }
 
-    /* Step 1: Power on */
+    /* Simple sanity check on ID; accept both common encodings. */
+    if (!((id == 0x09U) || ((id & 0xFCU) == 0x24U))) {
+        return 0;
+    }
+
+    /* Power on */
     if (!as7341_write_register(AS7341_REG_ENABLE, AS7341_PON)) return 0;
-    HAL_Delay(5); /* tPON stabilization */
+    HAL_Delay(5);
 
-    /* Step 2: Integration time ATIME = 29 */
-    if (!as7341_write_register(AS7341_REG_ATIME, 29U)) return 0;
+    /* Default timing/gain similar to previous implementation: ATIME=29, ASTEP=599, GAIN=x8 */
+    AS7341_ConfigTimingAndGain(29U, 599U, AS7341_GAIN_8X);
 
-    /* Step 3: ASTEP = 599 (LSB=0x57, MSB=0x02) */
-    if (!as7341_write_register(AS7341_REG_ASTEP_L, 0x57U)) return 0;
-    if (!as7341_write_register(AS7341_REG_ASTEP_H, 0x02U)) return 0;
-
-    /* Step 4: AGAIN = 3 (x8 gain) in CFG1 register */
-    if (!as7341_write_register(AS7341_REG_AGAIN, 0x03U)) return 0;
-
-    /* Step 5: Enable spectral measurements */
+    /* Enable spectral measurements */
     if (!as7341_write_register(AS7341_REG_ENABLE, AS7341_PON | AS7341_SP_EN)) return 0;
 
     return 1;
 }
 
-/**
- * @brief Reads Clear and NIR channels from the AS7341.
- *
- * The AS7341 default SMUX configuration after power-on maps the high channels
- * (F7, F8, Clear, NIR) to output registers CH0-CH3 starting at 0x95.
- * We read CH2 (Clear = 0x99) and CH3 (NIR = 0x9B) specifically.
- *
- * raw_data layout (4 bytes):
- *   [0] Clear LSB, [1] Clear MSB, [2] NIR LSB, [3] NIR MSB
- *
- * @param light_data  Destination struct for converted uint16 values.
- * @param raw_data    4-byte flat buffer for NAND storage.
- */
+void AS7341_ConfigTimingAndGain(uint8_t atime, uint16_t astep, AS7341_Gain gain) {
+    uint8_t step_l = (uint8_t)(astep & 0xFFU);
+    uint8_t step_h = (uint8_t)(astep >> 8);
+
+    as7341_write_register(AS7341_REG_ATIME, atime);
+    as7341_write_register(AS7341_REG_ASTEP_L, step_l);
+    as7341_write_register(AS7341_REG_ASTEP_H, step_h);
+    as7341_write_register(AS7341_REG_AGAIN, (uint8_t)gain);
+}
+
 void AS7341_ReadChannels(AS7341_Data *light_data, uint8_t *raw_data) {
     uint8_t buf[4] = {0};
 
-    /* Wait for a valid conversion (up to 50 ms) */
     if (!as7341_wait_avalid(50U)) {
-        /* Timeout: leave raw_data and light_data unchanged */
-        return;
+        return; /* timeout: leave previous values */
     }
 
-    /* Read Clear channel (CH2) = 2 bytes at 0x99 */
+    /* Default high-channel map: CH2=Clear, CH3=NIR */
     if (!as7341_read_register(AS7341_REG_CH2_L, &buf[0], 2U)) return;
-
-    /* Read NIR channel (CH3) = 2 bytes at 0x9B */
     if (!as7341_read_register(AS7341_REG_CH3_L, &buf[2], 2U)) return;
 
-    /* Copy to raw output for NAND packet */
-    raw_data[0] = buf[0];  /* Clear LSB */
-    raw_data[1] = buf[1];  /* Clear MSB */
-    raw_data[2] = buf[2];  /* NIR LSB   */
-    raw_data[3] = buf[3];  /* NIR MSB   */
+    raw_data[0] = buf[0];
+    raw_data[1] = buf[1];
+    raw_data[2] = buf[2];
+    raw_data[3] = buf[3];
 
-    /* Convert to uint16 for the struct */
     light_data->clear = (uint16_t)((buf[1] << 8) | buf[0]);
     light_data->nir   = (uint16_t)((buf[3] << 8) | buf[2]);
 }
 
+uint8_t AS7341_ReadSixChannels(uint16_t *dst6) {
+    uint8_t buf[12];
+
+    if (!as7341_wait_avalid(50U)) {
+        return 0;
+    }
+
+    if (!as7341_read_register(AS7341_REG_CH0_L, buf, sizeof(buf))) {
+        return 0;
+    }
+
+    for (uint8_t i = 0; i < 6; i++) {
+        uint8_t l = buf[2U * i];
+        uint8_t h = buf[2U * i + 1U];
+        dst6[i] = (uint16_t)((h << 8) | l);
+    }
+
+    return 1;
+}
+
+uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum) {
+    uint16_t tmp[6];
+
+    if (spectrum == NULL) return 0;
+
+    /* --- Low channels: F1–F4 + Clear + NIR --- */
+    as7341_select_regbank(1U);
+    as7341_smux_setup_F1F4_Clear_NIR();
+    as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
+    as7341_select_regbank(0U);
+
+    if (!AS7341_ReadSixChannels(tmp)) return 0;
+    for (uint8_t i = 0; i < 6; i++) {
+        spectrum->ch[i] = tmp[i];
+    }
+
+    /* --- High channels: F5–F8 + Clear + NIR --- */
+    as7341_select_regbank(1U);
+    as7341_smux_setup_F5F8_Clear_NIR();
+    as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
+    as7341_select_regbank(0U);
+
+    if (!AS7341_ReadSixChannels(tmp)) return 0;
+    for (uint8_t i = 0; i < 6; i++) {
+        spectrum->ch[6U + i] = tmp[i];
+    }
+
+    return 1;
+}
+
 /* ---- Private Helper Implementations ------------------------------------ */
 
-/**
- * @brief Reads one or more bytes from the AS7341 via I2C.
- */
 static uint8_t as7341_read_register(uint8_t reg_addr, uint8_t *data, uint16_t len) {
     if (HAL_I2C_Master_Transmit(&hi2c3, AS7341_I2C_ADDRESS << 1, &reg_addr, 1, AS7341_I2C_TIMEOUT) != HAL_OK)
         return 0;
@@ -118,9 +142,6 @@ static uint8_t as7341_read_register(uint8_t reg_addr, uint8_t *data, uint16_t le
     return 1;
 }
 
-/**
- * @brief Writes a single byte to an AS7341 register via I2C.
- */
 static uint8_t as7341_write_register(uint8_t reg_addr, uint8_t value) {
     uint8_t tx[2] = {reg_addr, value};
     if (HAL_I2C_Master_Transmit(&hi2c3, AS7341_I2C_ADDRESS << 1, tx, 2, AS7341_I2C_TIMEOUT) != HAL_OK)
@@ -128,11 +149,6 @@ static uint8_t as7341_write_register(uint8_t reg_addr, uint8_t value) {
     return 1;
 }
 
-/**
- * @brief Polls STATUS2.AVALID until set or timeout.
- * @param timeout_ms Maximum wait time in milliseconds.
- * @return 1 if AVALID was set before timeout, 0 if timed out.
- */
 static uint8_t as7341_wait_avalid(uint32_t timeout_ms) {
     uint32_t start = HAL_GetTick();
     uint8_t status = 0;
@@ -142,4 +158,84 @@ static uint8_t as7341_wait_avalid(uint32_t timeout_ms) {
         HAL_Delay(2);
     }
     return 0;
+}
+
+static void as7341_select_regbank(uint8_t enable_bank1) {
+    uint8_t cfg0 = 0;
+    if (!as7341_read_register(AS7341_REG_CFG0, &cfg0, 1)) return;
+
+    if (enable_bank1) {
+        cfg0 |= AS7341_REG_BANK_ACCESS;
+    } else {
+        cfg0 &= (uint8_t)(~AS7341_REG_BANK_ACCESS);
+    }
+
+    as7341_write_register(AS7341_REG_CFG0, cfg0);
+}
+
+static void as7341_smux_apply(AS7341_SmuxCmd cmd) {
+    /* Program CFG6 lower bits with SMUX command, then set SMUXEN in ENABLE. */
+    uint8_t cfg6 = 0;
+    uint8_t enable = 0;
+
+    as7341_read_register(AS7341_REG_CFG6, &cfg6, 1);
+    cfg6 &= (uint8_t)~0x03U;
+    cfg6 |= (uint8_t)cmd & 0x03U;
+    as7341_write_register(AS7341_REG_CFG6, cfg6);
+
+    as7341_read_register(AS7341_REG_ENABLE, &enable, 1);
+    enable |= AS7341_SMUXEN;
+    as7341_write_register(AS7341_REG_ENABLE, enable);
+
+    /* SMUXEN self-clears when the SMUX command is finished; no need to poll. */
+}
+
+/* The following SMUX configurations are direct translations of the
+ * Adafruit_AS7341::setup_F1F4_Clear_NIR and setup_F5F8_Clear_NIR functions,
+ * adapted to run on STM32 using our register helpers. */
+
+static void as7341_smux_setup_F1F4_Clear_NIR(void) {
+    as7341_write_register(0x00U, 0x30U); /* F3 left -> ADC2 */
+    as7341_write_register(0x01U, 0x01U); /* F1 left -> ADC0 */
+    as7341_write_register(0x02U, 0x00U);
+    as7341_write_register(0x03U, 0x00U); /* F8 left disabled */
+    as7341_write_register(0x04U, 0x00U); /* F6 left disabled */
+    as7341_write_register(0x05U, 0x42U); /* F4 left -> ADC3, F2 left -> ADC1 */
+    as7341_write_register(0x06U, 0x00U); /* F5 left disabled */
+    as7341_write_register(0x07U, 0x00U); /* F7 left disabled */
+    as7341_write_register(0x08U, 0x50U); /* CLEAR -> ADC4 */
+    as7341_write_register(0x09U, 0x00U); /* F5 right disabled */
+    as7341_write_register(0x0AU, 0x00U); /* F7 right disabled */
+    as7341_write_register(0x0BU, 0x00U);
+    as7341_write_register(0x0CU, 0x20U); /* F2 right -> ADC1 */
+    as7341_write_register(0x0DU, 0x04U); /* F4 right -> ADC3 */
+    as7341_write_register(0x0EU, 0x00U); /* F6/F8 right disabled */
+    as7341_write_register(0x0FU, 0x30U); /* F3 right -> ADC2 */
+    as7341_write_register(0x10U, 0x01U); /* F1 right -> ADC0 */
+    as7341_write_register(0x11U, 0x50U); /* CLEAR right -> ADC4 */
+    as7341_write_register(0x12U, 0x00U);
+    as7341_write_register(0x13U, 0x06U); /* NIR -> ADC5 */
+}
+
+static void as7341_smux_setup_F5F8_Clear_NIR(void) {
+    as7341_write_register(0x00U, 0x00U); /* F3 left disable */
+    as7341_write_register(0x01U, 0x00U); /* F1 left disable */
+    as7341_write_register(0x02U, 0x00U);
+    as7341_write_register(0x03U, 0x40U); /* F8 left -> ADC3 */
+    as7341_write_register(0x04U, 0x02U); /* F6 left -> ADC1 */
+    as7341_write_register(0x05U, 0x00U); /* F4/F2 disabled */
+    as7341_write_register(0x06U, 0x10U); /* F5 left -> ADC0 */
+    as7341_write_register(0x07U, 0x03U); /* F7 left -> ADC2 */
+    as7341_write_register(0x08U, 0x50U); /* CLEAR left -> ADC4 */
+    as7341_write_register(0x09U, 0x10U); /* F5 right -> ADC0 */
+    as7341_write_register(0x0AU, 0x03U); /* F7 right -> ADC2 */
+    as7341_write_register(0x0BU, 0x00U);
+    as7341_write_register(0x0CU, 0x00U); /* F2 right disable */
+    as7341_write_register(0x0DU, 0x00U); /* F4 right disable */
+    as7341_write_register(0x0EU, 0x24U); /* F8 right -> ADC3, F6 right -> ADC1 */
+    as7341_write_register(0x0FU, 0x00U); /* F3 right disable */
+    as7341_write_register(0x10U, 0x00U); /* F1 right disable */
+    as7341_write_register(0x11U, 0x50U); /* CLEAR right -> ADC4 */
+    as7341_write_register(0x12U, 0x00U);
+    as7341_write_register(0x13U, 0x06U); /* NIR -> ADC5 */
 }
