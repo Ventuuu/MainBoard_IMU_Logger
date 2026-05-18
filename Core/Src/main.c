@@ -10,8 +10,8 @@
   * single USER BUTTON. It performs three primary tasks:
   * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data from the LSM6DSO16IS
   *    via I2C at 100 Hz (TIM2), and Clear/NIR channels plus selected spectral
-  *    filters and flicker status from the AS7341 at ~10 Hz (every 10th timer tick)
-  *    on the same I2C bus (hi2c3).
+  *    filters and mains flicker classification from the AS7341 at ~10 Hz
+  *    (every 10th timer tick) on the same I2C bus (hi2c3).
   * 2. Wireless Transmission: Sends data packets via Bluetooth Low Energy (BLE)
   *    using the UART interface.
   * 3. Data Logging: Saves acquired data to NAND Flash memory.
@@ -101,7 +101,7 @@ static AS7341_Spectrum spectrum;        /* full spectral frame */
  *            groups – see Python decoder for exact mapping)
  *   [8..9]   Clear        (uint16, little-endian)
  *   [10..11] NIR          (uint16, little-endian)
- *   [12..13] Flicker freq (uint16, little-endian: 0, 1, 100 or 120)
+ *   [12..13] Mains freq   (uint16, little-endian: 0, 50 or 60 Hz equivalent)
  */
 uint8_t raw_light[14] = {0};
 static uint8_t light_tick = 0; /* subsample counter */
@@ -304,13 +304,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
                 raw_light[11] = (uint8_t)(nir >> 8);
             }
 
-            /* Flicker: use Adafruit-style status codes (0, 1, 100, 120).
-             * For now, call detectFlickerHz-equivalent via STATUS/FD_STATUS
-             * helper when you add it to as7341_driver.c. Here we zero it
-             * to keep the packet layout stable. */
-            uint16_t flicker_hz = 0U;
-            raw_light[12] = (uint8_t)(flicker_hz & 0xFFU);
-            raw_light[13] = (uint8_t)(flicker_hz >> 8);
+            /* Flicker: use on-chip flicker engine to classify mains freq
+             * into {0, 50, 60} Hz equivalents. */
+            uint16_t mains_hz = AS7341_DetectMainsHz();
+            raw_light[12] = (uint8_t)(mains_hz & 0xFFU);
+            raw_light[13] = (uint8_t)(mains_hz >> 8);
         }
 
         /* --- BLE transmission (IMU only, unchanged) --- */
