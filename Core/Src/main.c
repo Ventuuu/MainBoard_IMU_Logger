@@ -9,7 +9,7 @@
   * @details        : The application operates using a State Machine triggered by a
   * single USER BUTTON. It performs three primary tasks:
   * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data from the LSM6DSO16IS
-  *    via I2C at 100 Hz (TIM2), and Clear/NIR channels plus selected spectral
+  *    via I2C at 100 Hz (TIM2), and Clear/NIR channels plus full spectral
   *    filters and mains flicker classification from the AS7341 at ~10 Hz
   *    (every 10th timer tick) on the same I2C bus (hi2c3).
   * 2. Wireless Transmission: Sends data packets via Bluetooth Low Energy (BLE)
@@ -96,14 +96,13 @@ static AS7341_Data light_data;
 static AS7341_Spectrum spectrum;        /* full spectral frame */
 
 /*
- * raw_light layout (14 bytes):
- *   [0..7]   4 selected filter channels (F1..F4 or similar, low/high SMUX
- *            groups – see Python decoder for exact mapping)
- *   [8..9]   Clear        (uint16, little-endian)
- *   [10..11] NIR          (uint16, little-endian)
- *   [12..13] Mains freq   (uint16, little-endian: 0, 50 or 60 Hz equivalent)
+ * raw_light layout (22 bytes):
+ *   [0..15]  8 spectral filters F1..F8 (uint16 each, little-endian)
+ *   [16..17] Clear channel   (uint16, little-endian)
+ *   [18..19] NIR   channel   (uint16, little-endian)
+ *   [20..21] Mains freq (uint16, little-endian: 0, 50 or 60 Hz equivalent)
  */
-uint8_t raw_light[14] = {0};
+uint8_t raw_light[22] = {0};
 static uint8_t light_tick = 0; /* subsample counter */
 
 /// ----- NAND FLASH variables ----- ///
@@ -284,31 +283,28 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
             /* Full spectrum: 12 channels (F1–F8, Clear, NIR) */
             if (AS7341_ReadFullSpectrum(&spectrum)) {
-                /* Example mapping: take 4 filter channels plus Clear/NIR.
-                 * Here we pick spectrum.ch[0..3] as 4 filters; adjust in
-                 * Python script to assign exact wavelengths. */
-                for (uint8_t i = 0; i < 4; i++) {
+                /* Copy all 8 filter channels F1..F8 (indices 0..7 in spectrum) */
+                for (uint8_t i = 0; i < 8; i++) {
                     uint16_t v = spectrum.ch[i];
                     raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
                     raw_light[2U * i + 1] = (uint8_t)(v >> 8);
                 }
 
-                /* Clear and NIR: use two of the remaining channels.
-                 * For now, reuse previous Clear/NIR behaviour by mapping
-                 * to channels 4 and 5; adjust if you change SMUX mapping. */
-                uint16_t clear = spectrum.ch[4];
-                uint16_t nir   = spectrum.ch[5];
-                raw_light[8]  = (uint8_t)(clear & 0xFFU);
-                raw_light[9]  = (uint8_t)(clear >> 8);
-                raw_light[10] = (uint8_t)(nir & 0xFFU);
-                raw_light[11] = (uint8_t)(nir >> 8);
+                /* Clear and NIR: use two of the remaining channels. Adjust
+                 * indices if you change SMUX mapping in as7341_driver.c. */
+                uint16_t clear = spectrum.ch[8];
+                uint16_t nir   = spectrum.ch[9];
+                raw_light[16] = (uint8_t)(clear & 0xFFU);
+                raw_light[17] = (uint8_t)(clear >> 8);
+                raw_light[18] = (uint8_t)(nir & 0xFFU);
+                raw_light[19] = (uint8_t)(nir >> 8);
             }
 
             /* Flicker: use on-chip flicker engine to classify mains freq
              * into {0, 50, 60} Hz equivalents. */
             uint16_t mains_hz = AS7341_DetectMainsHz();
-            raw_light[12] = (uint8_t)(mains_hz & 0xFFU);
-            raw_light[13] = (uint8_t)(mains_hz >> 8);
+            raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
+            raw_light[21] = (uint8_t)(mains_hz >> 8);
         }
 
         /* --- BLE transmission (IMU only, unchanged) --- */
