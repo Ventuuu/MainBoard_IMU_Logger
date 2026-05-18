@@ -46,7 +46,7 @@
 /* SMUX RAM base address (bank 1, accessed via CFG0.REGBANK) */
 #define AS7341_SMUX_RAM_BASE    0x00U
 
-/* Flicker detection registers (not yet used, reserved for future work) */
+/* Flicker detection registers */
 #define AS7341_REG_FD_TIME1     0xD8U
 #define AS7341_REG_FD_TIME2     0xDAU
 #define AS7341_REG_FD_STATUS    0xDBU
@@ -138,5 +138,16 @@ uint8_t AS7341_ReadSixChannels(uint16_t *dst6);
  * @return 1 on success, 0 on error/timeout.
  */
 uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum);
+
+/**
+ * @brief Runs the on-chip flicker engine and returns an equivalent mains
+ *        frequency classification.
+ *
+ * Return value:
+ *   0  -> no mains flicker detected / unknown
+ *   50 -> 100 Hz flicker (50 Hz mains)
+ *   60 -> 120 Hz flicker (60 Hz mains)
+ */
+uint16_t AS7341_DetectMainsHz(void);
 
 #endif /* INC_AS7341_DRIVER_H_ */
