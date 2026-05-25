@@ -313,7 +313,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
             /* Update MCU-side exposure metrics for this light sample,
              * using flicker classification to split artificial vs natural
              * and to gate circadian dose. */
-            LightMetrics_Update(&spectrum, &timestamp, mains_hz);
+            LightMetrics_Update(&spectrum, &timestamp); //, mains_hz
         }
 
         /* --- BLE transmission (IMU only, unchanged for now) --- */
