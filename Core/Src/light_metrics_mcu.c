@@ -20,6 +20,10 @@ static uint64_t s_uvDoseAccum = 0ULL;
 static uint64_t s_blueExposureAccum = 0ULL;
 static uint64_t s_circadianDoseAccum = 0ULL;
 
+/* New: split blue exposure by light type inferred from flicker classification */
+static uint64_t s_blueExposureArtificialAccum = 0ULL;
+static uint64_t s_blueExposureNaturalAccum    = 0ULL;
+
 /* Default circadian-sensitive window: 20:00–24:00 (local logical time). */
 #define LM_CIRCADIAN_START_H  (20U)
 #define LM_CIRCADIAN_END_H    (24U)
@@ -33,10 +37,13 @@ void LightMetrics_Reset(void)
     s_uvDoseAccum = 0ULL;
     s_blueExposureAccum = 0ULL;
     s_circadianDoseAccum = 0ULL;
+    s_blueExposureArtificialAccum = 0ULL;
+    s_blueExposureNaturalAccum = 0ULL;
 }
 
 void LightMetrics_Update(const AS7341_Spectrum *spectrum,
-                         const Time_Struct *timestamp)
+                         const Time_Struct *timestamp,
+                         uint16_t mains_hz)
 {
     if (spectrum == NULL || timestamp == NULL) {
         return;
@@ -90,6 +97,16 @@ void LightMetrics_Update(const AS7341_Spectrum *spectrum,
     s_uvDoseAccum       += (uint64_t)s_uvRisk;
     s_blueExposureAccum += (uint64_t)s_blueWeightedIll;
 
+    /* --- Classify light type from mains flicker --------------------------- */
+    uint8_t is_artificial = (mains_hz == 50U) || (mains_hz == 60U);
+
+    if (is_artificial) {
+        s_blueExposureArtificialAccum += (uint64_t)s_blueWeightedIll;
+    } else {
+        /* Treat non-flickering samples as likely natural/daylight or DC LED. */
+        s_blueExposureNaturalAccum += (uint64_t)s_blueWeightedIll;
+    }
+
     /* --- Circadian dose: only inside [20:00, 24:00) ----------------------- */
     uint32_t seconds_of_day = ((uint32_t)timestamp->hh * 3600U)
                             + ((uint32_t)timestamp->mm * 60U)
@@ -98,7 +115,10 @@ void LightMetrics_Update(const AS7341_Spectrum *spectrum,
     uint32_t end_s   = LM_CIRCADIAN_END_H * 3600U;
 
     if (seconds_of_day >= start_s && seconds_of_day < end_s) {
-        s_circadianDoseAccum += (uint64_t)s_blueWeightedIll;
+        /* For circadian disruption we care most about artificial sources. */
+        if (is_artificial) {
+            s_circadianDoseAccum += (uint64_t)s_blueWeightedIll;
+        }
     }
 }
 
@@ -132,6 +152,16 @@ uint64_t LightMetrics_GetUvDoseAccum(void)
 uint64_t LightMetrics_GetBlueExposureAccum(void)
 {
     return s_blueExposureAccum;
+}
+
+uint64_t LightMetrics_GetBlueExposureArtificialAccum(void)
+{
+    return s_blueExposureArtificialAccum;
+}
+
+uint64_t LightMetrics_GetBlueExposureNaturalAccum(void)
+{
+    return s_blueExposureNaturalAccum;
 }
 
 uint64_t LightMetrics_GetCircadianDoseAccum(void)
