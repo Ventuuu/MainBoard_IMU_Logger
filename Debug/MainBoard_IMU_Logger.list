@@ -3393,7 +3393,7 @@ void BLE_Initialize(void) {
  8001c14:	f000 f8b8 	bl	8001d88 <enter_command_mode>
 
     // Set the device name for easy identification
-    uint8_t device_name[] = "SN,BLE_SW\r";
+    uint8_t device_name[] = "SN,BLE_SW_A9_Lumos\r";
  8001c18:	4a2b      	ldr	r2, [pc, #172]	@ (8001cc8 <BLE_Initialize+0xe8>)
  8001c1a:	f107 031c 	add.w	r3, r7, #28
  8001c1e:	ca07      	ldmia	r2, {r0, r1, r2}

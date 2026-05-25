@@ -39,6 +39,7 @@
 #include "imu_driver.h"
 #include "bluetooth.h"
 #include "as7341_driver.h"
+#include "light_metrics_mcu.h"
 
 /* USER CODE END Includes */
 
@@ -215,6 +216,9 @@ int main(void)
     }
   }
 
+  /* Reset MCU-side light exposure metrics accumulators. */
+  LightMetrics_Reset();
+
   LED_Off(LED_RED);
 
   /* USER CODE END 2 */
@@ -305,9 +309,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
             uint16_t mains_hz = AS7341_DetectMainsHz();
             raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
             raw_light[21] = (uint8_t)(mains_hz >> 8);
+
+            /* Update MCU-side exposure metrics for this light sample,
+             * using flicker classification to split artificial vs natural
+             * and to gate circadian dose. */
+            LightMetrics_Update(&spectrum, &timestamp); //, mains_hz
         }
 
-        /* --- BLE transmission (IMU only, unchanged) --- */
+        /* --- BLE transmission (IMU only, unchanged for now) --- */
         BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
         BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
 
