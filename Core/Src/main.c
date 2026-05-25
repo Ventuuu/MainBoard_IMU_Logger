@@ -307,9 +307,35 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
             raw_light[21] = (uint8_t)(mains_hz >> 8);
         }
 
+        /*----- Read microphone -----*/
+        
+
         /* --- BLE transmission (IMU only, unchanged) --- */
+        uint8_t raw_light_1[6]
+        uint8_t raw_light_2[6]
+        uint8_t raw_light_3[6]
+        uint8_t raw_light_4[6]
+        for(i=0, i<6, i++)
+        {
+          raw_light_1[i] = raw_light[i]
+          raw_light_2 [i]= raw_light[i+(6*1)]
+          raw_light_3[i] = raw_light[i+(6*2)]
+          if (i < 5)
+          {
+            raw_light_4[i] = raw_light[i+(6*3)]
+          }
+          else
+          {
+            raw_light_4[i] = 0;
+          }
+        }
+
         BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
         BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
+        BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_1, raw_light_1);
+        BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_2, raw_light_2);
+        BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_3, raw_light_3);
+        BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_4, raw_light_4);
 
         /* --- Timestamp @ 100 Hz --- */
         timestamp.sss = tim * 10;

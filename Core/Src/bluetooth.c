@@ -242,6 +242,18 @@ void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t* data_buffer) {
         case DATA_TYPE_IMU_GYROSCOPE:
             ble_packet[1] = 'G';
             break;
+        case DATA_TYPE_AS7341_SPECTRUM_1:
+            ble_packet[1] = 'S1';
+            break;
+        case DATA_TYPE_AS7341_SPECTRUM_2:
+            ble_packet[1] = 'S2';
+            break;
+        case DATA_TYPE_AS7341_SPECTRUM_3:
+            ble_packet[1] = 'S3';
+            break;
+        case DATA_TYPE_AS7341_SPECTRUM_4:
+            ble_packet[1] = 'S4';
+            break;
         default:
             ble_packet[1] = 'U'; // Unknown data type
             break;

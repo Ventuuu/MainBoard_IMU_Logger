@@ -22,7 +22,11 @@
 // This enum defines the possible types of data packets that can be sent.
 typedef enum {
     DATA_TYPE_IMU_ACCELERATION, // Indicates acceleration data from an IMU
-    DATA_TYPE_IMU_GYROSCOPE     // Indicates gyroscope data from an IMU
+    DATA_TYPE_IMU_GYROSCOPE,    // Indicates gyroscope data from an IMU
+    DATA_TYPE_AS7341_SPECTRUM_1,   // Indicates spectrum data from as7341
+    DATA_TYPE_AS7341_SPECTRUM_2,
+    DATA_TYPE_AS7341_SPECTRUM_3,
+    DATA_TYPE_AS7341_SPECTRUM_4
 } BLE_DataType;
 
 // --- Function Prototypes ---
