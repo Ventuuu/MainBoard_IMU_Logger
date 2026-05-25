@@ -78,6 +78,15 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* USER CODE BEGIN PV */
 
+//--- Microphone acquisition variables ---
+#define AUDIO_BUFFER_SIZE 1024U
+
+int16_t audio_buffer[AUDIO_BUFFER_SIZE];
+MDF_DmaConfigTypeDef mic_dma_config;
+
+static uint8_t microphone_active = 0U;
+volatile uint8_t audio_buffer_ready = 0U;
+
 // --- State Machine ---
 static AppState current_state = STATE_IDLE;
 
@@ -145,7 +154,15 @@ static void MX_SPI3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+//--michrophone acquisition complete callback: set flag and stop acquisition to prevent overwriting buffer before processing ----//
+void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
+{
+    if (hmdf == &MdfHandle0)
+    {
+        audio_buffer_ready = 1U;
+        microphone_active = 0U;
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -218,7 +235,10 @@ int main(void)
   LED_Off(LED_RED);
 
   /* USER CODE END 2 */
-
+  mic_dma_config.Address    = (uint32_t)audio_buffer;
+  mic_dma_config.DataLength = AUDIO_BUFFER_SIZE * sizeof(int16_t);
+  mic_dma_config.MsbOnly    = ENABLE;
+  
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -230,23 +250,60 @@ int main(void)
 	  switch(current_state)
 	  {
 	  	  case STATE_IDLE:
-	  		if(!usb_flag)
-		    {
-	  			//MX_USB_Device_Init();
-		    }
-	  		else
-	  		{
-			   current_state = STATE_USB_CONNECTED;
-			   LED_On(LED_GREEN);
-		    }
-	  		break;
+          if (microphone_active)
+          {
+          HAL_MDF_AcqStop_DMA(&MdfHandle0);
+          microphone_active = 0U;
+          }
+
+          if (!usb_flag)
+          {
+          /* existing idle behavior */
+          }
+          else
+          {
+          current_state = STATE_USB_CONNECTED;
+          LED_On(LED_GREEN);
+          }     
+          break;
 
 	  	  case STATE_ACQUISITION:
-	  		   /* All acquisition handled in TIM2 callback */
-			break;
+
+          if (audio_buffer_ready)
+          {
+            audio_buffer_ready = 0U;
+
+            memset(NAND_packet, 0, sizeof(NAND_packet));
+
+            memcpy(NAND_packet,
+               (uint8_t *)audio_buffer,
+               AUDIO_BUFFER_SIZE * sizeof(int16_t));
+
+            /*
+              * Qui serve una funzione che scriva NAND_packet nella NAND.
+              * Non posso affermare che write_memory() sia sufficiente
+             * senza vedere Memory_operations.c/.h.
+              */
+
+            current_state = STATE_IDLE;
+            LED_Off(LED_GREEN);
+          }
+          else if (!microphone_active)
+          {
+            if (HAL_MDF_AcqStart_DMA(&MdfHandle0,
+                                 &MdfFilterConfig0,
+                                 &mic_dma_config) != HAL_OK)
+            {
+            Error_Handler();
+            }
+
+            microphone_active = 1U;
+          }
+
+          break;
 
 	  	  case STATE_USB_CONNECTED:
-	  		break;
+	  		 break;
 
 	  	  case STATE_DOWNLOAD:
 	  		  read_memory_and_transmit();
