@@ -45,7 +45,8 @@ extern "C" {
  *                       window gating; not necessarily wall-clock time.
  */
 void LightMetrics_Update(const AS7341_Spectrum *spectrum,
-                         const Time_Struct *timestamp);
+                         const Time_Struct *timestamp,
+                        uint16_t mains_hz = 50U);
 
 /* --- Getters for latest instantaneous values (for BLE or debugging) ------ */
 
