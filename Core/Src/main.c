@@ -226,7 +226,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
 	  switch(current_state)
 	  {
 	  	  case STATE_IDLE:
@@ -813,8 +812,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (light_tick >= LIGHT_SUBSAMPLE) {
       light_tick = 0;
 
+
       /* Full spectrum: 12 channels (F1–F8, Clear, NIR) */
       if (AS7341_ReadFullSpectrum(&spectrum)) {
+
           /* Copy all 8 filter channels F1..F8 (indices 0..7 in spectrum) */
           for (uint8_t i = 0; i < 8; i++) {
               uint16_t v = spectrum.ch[i];
