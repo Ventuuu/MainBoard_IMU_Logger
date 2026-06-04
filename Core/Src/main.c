@@ -812,32 +812,32 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (light_tick >= LIGHT_SUBSAMPLE) {
       light_tick = 0;
 
-
+      
       /* Full spectrum: 12 channels (F1–F8, Clear, NIR) */
       if (AS7341_ReadFullSpectrum(&spectrum)) {
-
-          /* Copy all 8 filter channels F1..F8 (indices 0..7 in spectrum) */
-          for (uint8_t i = 0; i < 8; i++) {
-              uint16_t v = spectrum.ch[i];
-              raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
-              raw_light[2U * i + 1] = (uint8_t)(v >> 8);
-          }
-
-          /* Clear and NIR: use two of the remaining channels. Adjust
-            * indices if you change SMUX mapping in as7341_driver.c. */
-          uint16_t clear = spectrum.ch[8];
-          uint16_t nir   = spectrum.ch[9];
-          raw_light[16] = (uint8_t)(clear & 0xFFU);
-          raw_light[17] = (uint8_t)(clear >> 8);
-          raw_light[18] = (uint8_t)(nir & 0xFFU);
-          raw_light[19] = (uint8_t)(nir >> 8);
+        /* Copy all 8 filter channels F1..F8 (indices 0..7 in spectrum) */
+        for (uint8_t i = 0; i < 8; i++) {
+          uint16_t v = spectrum.ch[i];
+          raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
+          raw_light[2U * i + 1] = (uint8_t)(v >> 8);
+        }
+        
+        /* Clear and NIR: use two of the remaining channels. Adjust
+        * indices if you change SMUX mapping in as7341_driver.c. */
+        uint16_t clear = spectrum.ch[8];
+        uint16_t nir   = spectrum.ch[9];
+        raw_light[16] = (uint8_t)(clear & 0xFFU);
+        raw_light[17] = (uint8_t)(clear >> 8);
+        raw_light[18] = (uint8_t)(nir & 0xFFU);
+        raw_light[19] = (uint8_t)(nir >> 8);
       }
-
+      
       /* Flicker: use on-chip flicker engine to classify mains freq
-        * into {0, 50, 60} Hz equivalents. */
+      * into {0, 50, 60} Hz equivalents. */
       uint16_t mains_hz = AS7341_DetectMainsHz();
       raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
       raw_light[21] = (uint8_t)(mains_hz >> 8);
+
 
       /* --- BLE transmission (as7341) --- */
       uint8_t raw_light_1[6];
@@ -863,7 +863,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_2, raw_light_2);
       BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_3, raw_light_3);
       BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_4, raw_light_4);
-      
     }
 
       /*----- Read microphone -----*/

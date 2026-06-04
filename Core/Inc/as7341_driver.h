@@ -126,7 +126,7 @@ void AS7341_ConfigTimingAndGain(uint8_t atime, uint16_t astep, AS7341_Gain gain)
  * @brief Blocking helper that reads all 6 CHx registers into an array.
  *        Used internally by the full-spectrum API.
  */
-uint8_t AS7341_ReadSixChannels(uint16_t *dst6,int second);
+uint8_t AS7341_ReadSixChannels(uint16_t *dst6);
 
 /**
  * @brief Reads a full spectral frame (12 channels: F1–F8, Clear, NIR) using

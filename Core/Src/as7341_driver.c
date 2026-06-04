@@ -13,7 +13,6 @@
 #include "as7341_driver.h"
 #include "main.h"
 
-#include "led_driver.h"
 #include "stm32u5xx_hal.h"
 
 
@@ -22,7 +21,7 @@ extern I2C_HandleTypeDef hi2c3;
 /* ---- Private helper prototypes ----------------------------------------- */
 static uint8_t as7341_read_register(uint8_t reg_addr, uint8_t *data, uint16_t len);
 static uint8_t as7341_write_register(uint8_t reg_addr, uint8_t value);
-static uint8_t as7341_wait_avalid(uint32_t timeout_ms, int second);
+static uint8_t as7341_wait_avalid(uint32_t timeout_ms);
 static void    as7341_select_regbank(uint8_t enable_bank1);
 static void    as7341_smux_apply(AS7341_SmuxCmd cmd);
 static void    as7341_smux_setup_F1F4_Clear_NIR(void);
@@ -71,7 +70,7 @@ void AS7341_ConfigTimingAndGain(uint8_t atime, uint16_t astep, AS7341_Gain gain)
 void AS7341_ReadChannels(AS7341_Data *light_data, uint8_t *raw_data) {
     uint8_t buf[4] = {0};
 
-    if (!as7341_wait_avalid(50U, 0)) {
+    if (!as7341_wait_avalid(50U)) {
         return; /* timeout: leave previous values */
     }
 
@@ -88,9 +87,9 @@ void AS7341_ReadChannels(AS7341_Data *light_data, uint8_t *raw_data) {
     light_data->nir   = (uint16_t)((buf[3] << 8) | buf[2]);
 }
 
-uint8_t AS7341_ReadSixChannels(uint16_t *dst6, int second) {
+uint8_t AS7341_ReadSixChannels(uint16_t *dst6) {
     uint8_t buf[12];
-    if (!as7341_wait_avalid(50U, second)) {
+    if (!as7341_wait_avalid(50U)) {
         return 0;
     }
     
@@ -118,7 +117,7 @@ uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum) {
     as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
     as7341_select_regbank(0U);
 
-    if (!AS7341_ReadSixChannels(tmp, 0)) return 0;
+    if (!AS7341_ReadSixChannels(tmp)) return 0;
     for (uint8_t i = 0; i < 6; i++) {
         spectrum->ch[i] = tmp[i];
     }
@@ -130,7 +129,7 @@ uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum) {
     as7341_select_regbank(0U);
 
 
-    if (!AS7341_ReadSixChannels(tmp, 1))return 0;
+    if (!AS7341_ReadSixChannels(tmp))return 0;
     for (uint8_t i = 0; i < 6; i++) {
         spectrum->ch[6U + i] = tmp[i]; // PROBLEM! breaking line!
     }
@@ -186,7 +185,7 @@ uint16_t AS7341_DetectMainsHz(void) {
         if (status != 0U) {
             return as7341_decode_flicker_mains(status);
         }
-        HAL_Delay(10U);
+        //HAL_Delay(10U);
     }
 
     /* Timeout or no valid flicker detected. */
@@ -210,17 +209,13 @@ static uint8_t as7341_write_register(uint8_t reg_addr, uint8_t value) {
     return 1;
 }
 
-static uint8_t as7341_wait_avalid(uint32_t timeout_ms, int second) {
+static uint8_t as7341_wait_avalid(uint32_t timeout_ms) {
     uint32_t start = HAL_GetTick();
     uint8_t status = 0;
     while ((HAL_GetTick() - start) < timeout_ms) {
         as7341_read_register(AS7341_REG_STATUS2, &status, 1);
         if (status & AS7341_AVALID) return 1;
-        HAL_Delay(2);
-        while (second) {
-        LED_Toggle(LED_RED);
-        HAL_Delay(5000);
-        }
+        //HAL_Delay(2);
     }
     return 0;
 }
