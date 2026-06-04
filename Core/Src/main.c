@@ -161,6 +161,7 @@ int main(void)
 
   /* MCU Configuration--------------------------------------------------------*/
 
+
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -801,7 +802,7 @@ static void MX_GPIO_Init(void)
   */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if(htim == &htim2)
+  if(htim == &htim2)
   {
     /* --- Read IMU (always) --- */
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
@@ -838,18 +839,27 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
       raw_light[21] = (uint8_t)(mains_hz >> 8);
 
+      /*
+            while (1) {
+    LED_Toggle(LED_RED);
+    HAL_Delay(5000);
+}
+    */
+      
 
       /* --- BLE transmission (as7341) --- */
       uint8_t raw_light_1[6];
       uint8_t raw_light_2[6];
       uint8_t raw_light_3[6];
       uint8_t raw_light_4[6];
+
+      
       for(int i=0; i<6; i++)
       {
         raw_light_1[i] = raw_light[i];
         raw_light_2 [i]= raw_light[i+(6*1)];
         raw_light_3[i] = raw_light[i+(6*2)];
-        if (i < 5)
+        if (i < 4)
         {
           raw_light_4[i] = raw_light[i+(6*3)];
         }
@@ -859,6 +869,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         }
       }
       
+
       BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_1, raw_light_1);
       BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_2, raw_light_2);
       BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_3, raw_light_3);
