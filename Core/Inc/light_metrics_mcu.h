@@ -2,36 +2,26 @@
  * @file light_metrics_mcu.h
  * @brief On-MCU light exposure metrics computed from AS7341 spectral data.
  *
- * This module provides a lightweight, integer-only implementation of a few
- * key light exposure metrics so they can be streamed over BLE without
- * sending the full spectral frame at high rate.
- *
  * Metrics exposed (per sample / cumulative):
  *   - BlueIndex                = F3 + F4
  *   - BlueFrac (Q15)           = (F3 + F4) / sum(F1..F8)
+ *   - SunLikeIndex (Q15)       = (F7 + F8) / sum(F1..F8)
+ *                                High → red-rich sun-like; Low → artificial blue
  *   - UV_risk                  ≈ (F1+F2+F3)/sum(F1..F8) * Clear
  *   - BlueWeightedIlluminance  = (F3 + F4) * Clear
- *   - UV_dose_accum            = sum(UV_risk)
- *   - BlueExposure_accum       = sum(BlueWeightedIlluminance)
- *   - BlueExposureArtificial   = blue exposure from mains-flickering sources
- *   - BlueExposureNatural      = blue exposure from non-flickering sources
- *   - CircadianDose_accum      = sum(BlueWeightedIlluminance) only when
- *                                timestamp is within an evening window
- *                                (default 20:00–24:00) AND light is
- *                                classified as artificial.
- *
- * All doses are expressed in arbitrary units per light sample (10 Hz).
- * The application or mobile app is expected to rescale them by the
- * effective sampling interval if absolute units are required.
+ *   - UV_dose_accum
+ *   - BlueExposure_accum
+ *   - BlueExposureArtificial
+ *   - BlueExposureNatural
+ *   - CircadianDose_accum
  */
 
 #ifndef INC_LIGHT_METRICS_MCU_H_
 #define INC_LIGHT_METRICS_MCU_H_
 
 #include <stdint.h>
-
-#include "as7341_driver.h"      /* AS7341_Spectrum */
-#include "Memory_operations.h"  /* Time_Struct */
+#include "as7341_driver.h"
+#include "Memory_operations.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,64 +29,54 @@ extern "C" {
 
 /**
  * @brief Update instantaneous metrics and cumulative doses for one light sample.
+ * Call at 10 Hz after AS7341_ReadFullSpectrum().
  *
- * This should be called at the light sensor rate (10 Hz), after a successful
- * AS7341_ReadFullSpectrum() call and after the timestamp has been updated.
- *
- * The light type (artificial vs natural/DC) is inferred from mains_hz:
- *   - mains_hz == 50 or 60 → artificial (mains-driven)
- *   - mains_hz == 0        → natural or DC-driven
- *
- * @param[in] spectrum   Latest full spectral frame (F1..F8, Clear, NIR).
- * @param[in] timestamp  Current logical time (hh:mm:ss) used for circadian
- *                       window gating; not necessarily wall-clock time.
- * @param[in] mains_hz   Flicker classification: 0, 50, or 60.
+ * @param spectrum   Latest full spectral frame (F1..F8, Clear, NIR).
+ * @param timestamp  Current logical time (hh:mm:ss) for circadian gating.
+ * @param mains_hz   Flicker classification: 0, 50, or 60.
  */
 void LightMetrics_Update(const AS7341_Spectrum *spectrum,
                          const Time_Struct *timestamp,
                          uint16_t mains_hz);
 
-/* --- Getters for latest instantaneous values (for BLE or debugging) ------ */
+/* --- Instantaneous getters (latest sample, use for BLE packets) ---------- */
 
-/** @return Latest BlueIndex = F3 + F4 (saturated to 16 bits). */
+/** BlueIndex = F3 + F4 (saturated to 16 bits). */
 uint16_t LightMetrics_GetBlueIndex(void);
 
-/**
- * @return Latest BlueFrac in Q15 format (0.0–1.0 mapped to 0–32767).
- *         0 if sum(F1..F8) == 0.
- */
+/** BlueFrac Q15: (F3+F4)/sum(F1..F8) mapped to 0..32767. */
 uint16_t LightMetrics_GetBlueFracQ15(void);
 
-/** @return Latest UV_risk proxy (32-bit, arbitrary units). */
+/**
+ * SunLikeIndex Q15: (F7+F8)/sum(F1..F8) mapped to 0..32767.
+ *
+ * This is the red-channel fraction of the spectrum.
+ * Sunlight has significant red content → high SunLikeIndex.
+ * Cool-white LEDs have much less red → low SunLikeIndex.
+ * Use in combination with CLEAR > threshold to decide "outdoors in sun".
+ *
+ * Typical observed ranges (to refine with real data):
+ *   Outdoor sunlight   : ~6000–12000 (Q15)
+ *   Indoor cool-white  : ~800–2500   (Q15)
+ *   Indoor warm-white  : ~2500–5000  (Q15)
+ */
+uint16_t LightMetrics_GetSunLikeIndexQ15(void);
+
+/** UV_risk proxy: (F1+F2+F3)/sum * CLEAR (32-bit, arbitrary units). */
 uint32_t LightMetrics_GetUvRisk(void);
 
-/** @return Latest blue-weighted illuminance proxy (32-bit, arbitrary units). */
+/** Blue-weighted illuminance: (F3+F4) * CLEAR (32-bit, arbitrary units). */
 uint32_t LightMetrics_GetBlueWeightedIlluminance(void);
 
-/* --- Getters for cumulative doses (monotonically non-decreasing) --------- */
+/* --- Cumulative dose getters --------------------------------------------- */
 
-/** @return Cumulative UV risk dose (sum of UV_risk over samples). */
 uint64_t LightMetrics_GetUvDoseAccum(void);
-
-/** @return Cumulative blue-weighted exposure over all samples. */
 uint64_t LightMetrics_GetBlueExposureAccum(void);
-
-/** @return Cumulative blue exposure from artificial (mains-flickering) light. */
 uint64_t LightMetrics_GetBlueExposureArtificialAccum(void);
-
-/** @return Cumulative blue exposure from natural or DC-driven light. */
 uint64_t LightMetrics_GetBlueExposureNaturalAccum(void);
-
-/**
- * @return Cumulative circadian-relevant dose (only samples whose timestamp
- *         is within the configured window and classified as artificial
- *         contribute).
- */
 uint64_t LightMetrics_GetCircadianDoseAccum(void);
 
-/**
- * @brief Reset all instantaneous values and accumulators.
- */
+/** Reset all instantaneous values and accumulators (call at session start). */
 void LightMetrics_Reset(void);
 
 #ifdef __cplusplus

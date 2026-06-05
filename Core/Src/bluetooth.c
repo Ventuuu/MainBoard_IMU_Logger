@@ -1,289 +1,260 @@
 /**
- * \file bluetooth.c
- * \brief Implementation file for RN4871 Bluetooth Low Energy functions.
+ * @file bluetooth.c
+ * @brief RN4871 BLE module driver — packet builders aligned with Flutter app.
  *
- * This file contains the implementation of functions for configuring and
- * communicating with the Microchip RN4871 Bluetooth® Low Energy Module.
+ * Packet format (20 bytes):
+ *   [0]     0x7B '{'
+ *   [1]     MsgType byte
+ *   [2..18] payload (little-endian)
+ *   [19]    0x7D '}'
  *
- * The RN4871 module is a fully certified Bluetooth Smart module that is
- * controlled primarily through ASCII commands sent from a host MCU to its UART.
- * The module operates in two main modes:
- * - Data mode: Acts as a data pipe, transparently transferring serial data.
- * - Command mode: Interprets UART data as ASCII commands for configuration.
- *
- * Default UART Settings:
- * Baud Rate: 115200
- * Data Bits: 8
- * Parity: None
- * Stop Bits: 1
- * Flow Control: Disabled
+ * This matches the Flutter app's MainShell._onPacket() decoder exactly.
+ * See bluetooth.h for field-by-field documentation.
  */
 
-#include <bluetooth.h>
+#include "bluetooth.h"
 #include "main.h"
+#include <string.h>
 
 extern UART_HandleTypeDef huart3;
 
-// --- Helper Functions (Internal to this file) ---
-// These functions are not meant to be called directly by the user.
+/* --- Internal helpers ---------------------------------------------------- */
 
 static void enter_command_mode(void);
 static void exit_command_mode(void);
 
-// --- Public Function Implementations ---
-
-/**
- * @brief Performs a hard reset of the BLE module via the MCU's reset pin.
- *
- * A hard reset is necessary to apply certain configuration changes and
- * to ensure the module is in a known, initial state before sending commands.
- */
-void BLE_HardReset(void) {
-    // Pull the reset pin low to activate the reset
-    HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, 0);
-    HAL_Delay(1000); // Wait for the module to reset
-    // Pull the reset pin high to exit the reset state
-    HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, 1);
+/** Write a UInt16 in little-endian order into dst[0] and dst[1]. */
+static inline void put_u16le(uint8_t *dst, uint16_t v)
+{
+    dst[0] = (uint8_t)(v & 0xFFU);
+    dst[1] = (uint8_t)((v >> 8U) & 0xFFU);
 }
 
-/**
- * @brief Configures the RN4871 BLE Module at startup.
- *
- * This function sets up the device name, enables the Transparent UART service,
- * and enables the UART RX Indication pin functionality.
- */
-void BLE_Initialize(void) {
-    uint8_t reboot_response[9] = {0};
+/** Write an Int16 in little-endian order into dst[0] and dst[1]. */
+static inline void put_i16le(uint8_t *dst, int16_t v)
+{
+    put_u16le(dst, (uint16_t)v);
+}
+
+/** Initialise a zeroed, framed 20-byte packet and set the MsgType byte. */
+static inline void init_packet(uint8_t *pkt, uint8_t msg_type)
+{
+    memset(pkt, 0, PACKET_LENGTH);
+    pkt[0]                 = 0x7BU;  /* '{' */
+    pkt[1]                 = msg_type;
+    pkt[PACKET_LENGTH - 1] = 0x7DU;  /* '}' */
+}
+
+/* --- Public: module lifecycle -------------------------------------------- */
+
+void BLE_HardReset(void)
+{
+    HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_RESET);
+    HAL_Delay(1000);
+    HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET);
+}
+
+void BLE_Initialize(void)
+{
+    uint8_t reboot_response[9]       = {0};
     uint8_t command_ok_response[100] = {0};
 
-    // Perform a hard reset to get the module into a known state
     BLE_HardReset();
-    HAL_UART_Receive(&huart3, reboot_response, sizeof(reboot_response), UART_TIMEOUT); // Read initial reboot string
+    HAL_UART_Receive(&huart3, reboot_response, sizeof(reboot_response), UART_TIMEOUT);
 
-    // Enter Command Mode to send configuration commands
     enter_command_mode();
 
-    // Set the device name for easy identification
-    uint8_t device_name[] = "A9 - Big Bad Board\r";
+    /* Device name — the app filters by the prefix "BLE_SW" */
+    uint8_t device_name[] = "SN,BLE_SW\r";
     BLE_SendData(device_name, sizeof(device_name) - 1);
-    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT); // Read 'AOK' response
+    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
 
-    // Enable Transparent UART service (UUID: 49535343-FE7D-4AE5-8FA9-9FAFD205E455)
+    /* Enable Transparent UART service (UUID 49535343-FE7D-...) */
     uint8_t enable_transparent_uart[] = "SS,C0\r";
     BLE_SendData(enable_transparent_uart, sizeof(enable_transparent_uart) - 1);
     HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
 
-    // Set Pin P16 to act as UART RX Indication, which is useful for waking up the module
+    /* UART RX indication pin */
     uint8_t enable_uart_rx_ind[] = "SW,0C,04\r";
     BLE_SendData(enable_uart_rx_ind, sizeof(enable_uart_rx_ind) - 1);
     HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
 
-    // Reboot the module for the new settings to take effect
     uint8_t reboot_command[] = "R,1\r";
     BLE_SendData(reboot_command, sizeof(reboot_command) - 1);
     HAL_Delay(100);
 
-    // Exit Command Mode and return to Data Mode
     exit_command_mode();
 }
 
-/**
- * @brief Configures the RN4871 BLE Module to enter Dormant (Deep Sleep) mode.
- *
- * In this mode, the module consumes minimal power, and all RF communication is stopped.
- * The module can be woken up by toggling the UART_RX_IND pin.
- */
-void BLE_EnterDormantMode(void) {
+void BLE_EnterDormantMode(void)
+{
     uint8_t reboot_response[9] = {0};
-
-    // Ensure the module is in a known state before sending commands
     BLE_HardReset();
     HAL_UART_Receive(&huart3, reboot_response, sizeof(reboot_response), UART_TIMEOUT);
-
-    // Set the UART_RX_IND pin high to prepare for Dormant mode entry
-    HAL_GPIO_WritePin(BLE_UART_RX_IND_GPIO_Port, BLE_UART_RX_IND_Pin, 1);
-    HAL_Delay(10); // Small delay to allow the pin state to stabilize
-
-    // Enter Command Mode
+    HAL_GPIO_WritePin(BLE_UART_RX_IND_GPIO_Port, BLE_UART_RX_IND_Pin, GPIO_PIN_SET);
+    HAL_Delay(10);
     enter_command_mode();
-
-    // Send the command "O,0" to enter Dormant mode
     uint8_t dormant_mode_command[] = "O,0\r";
     BLE_SendData(dormant_mode_command, sizeof(dormant_mode_command) - 1);
-
-    HAL_Delay(100); // Wait for the module to enter sleep
-}
-
-/**
- * @brief Wakes the RN4871 BLE Module from Dormant/Sleep mode.
- *
- * This function wakes the module by toggling the UART_RX_IND pin and then
- * re-initializes it to a functional state.
- */
-void BLE_WakeUp(void) {
-    // Toggle the UART_RX_IND pin to wake up the module
-    // The module's 16 MHz clock restarts when this pin goes low.
-    HAL_GPIO_WritePin(BLE_UART_RX_IND_GPIO_Port, BLE_UART_RX_IND_Pin, 0);
-    HAL_Delay(5); // Wait for the clock to stabilize
-
-    // After waking up, we need to re-enter command mode and return to data mode
-    // to ensure the module is ready for communication.
-    BLE_Initialize();
-}
-
-/**
- * @brief Configures the RN4871 BLE Module to enter Low-Power mode.
- *
- * In this mode, the module uses a 32kHz clock, significantly reducing power consumption.
- * A BLE connection can still be maintained, but the UART cannot receive data.
- */
-void BLE_EnterLowPowerMode(void) {
-    uint8_t command_ok_response[100] = {0};
-
-    // Enter Command Mode
-    enter_command_mode();
-
-    // Send the command "SO,1" to enable Low-Power mode
-    uint8_t low_power_command[] = "SO,1\r";
-    BLE_SendData(low_power_command, sizeof(low_power_command) - 1);
-    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
-
-    // Exit Command Mode
-    exit_command_mode();
-}
-
-/**
- * @brief Exits the RN4871 BLE Module from Low-Power mode to Active mode.
- *
- * This function returns the module to its normal operating state (16MHz clock).
- */
-void BLE_ExitLowPowerMode(void) {
-    uint8_t command_ok_response[100] = {0};
-
-    // Enter Command Mode
-    enter_command_mode();
-
-    // Send the command "SO,0" to exit Low-Power mode
-    uint8_t exit_low_power_command[] = "SO,0\r";
-    BLE_SendData(exit_low_power_command, sizeof(exit_low_power_command) - 1);
-    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
-
-    // Exit Command Mode
-    exit_command_mode();
-}
-
-/**
- * @brief Configures the RN4871 BLE Module for slow advertisements.
- *
- * This reduces power consumption by broadcasting less frequently.
- * The command "A,03E8,002F" sets the advertising interval to 1000ms.
- */
-void BLE_SetSlowAdvertisements(void) {
-    uint8_t command_ok_response[100] = {0};
-
-    // Enter Command Mode
-    enter_command_mode();
-
-    // Send the command "A,03E8,002F" to set slow advertisement intervals
-    // 03E8 is 1000 in hex (1000ms), 002F is 47ms (min interval)
-    uint8_t slow_ads_command[] = "A,03E8,002F\r";
-    BLE_SendData(slow_ads_command, sizeof(slow_ads_command) - 1);
-    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
-
-    // Exit Command Mode
-    exit_command_mode();
-}
-
-/**
- * @brief Sends data to a connected external BLE device.
- *
- * This function uses the Transparent UART service to transmit data.
- * @param data Pointer to the data buffer to send.
- * @param data_length The number of bytes to send.
- */
-void BLE_SendData(uint8_t* data, uint8_t data_length) {
-    HAL_UART_Transmit(&huart3, data, data_length, UART_TIMEOUT);
-}
-
-/**
- * @brief Receives data from a connected external BLE device.
- *
- * This function reads data from the Transparent UART service.
- * @param data Pointer to the buffer where received data will be stored.
- * @param data_length The number of bytes to read.
- */
-void BLE_ReceiveData(uint8_t* data, uint8_t data_length) {
-    HAL_UART_Receive(&huart3, data, data_length, UART_TIMEOUT);
-}
-
-/**
- * @brief Sends a structured data packet with a specific type and value.
- *
- * This function creates a standardized packet format to send specific sensor data.
- * The packet format is: { | Type | MSB of Value | ... | LSB of Value | ... | }
- * @param type The type of data being sent (e.g., acceleration, gyroscope).
- * @param value The 32-bit value to be sent.
- */
-void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t* data_buffer) {
-    uint8_t ble_packet[PACKET_LENGTH];
-
-    // Initialize the packet buffer
-    ble_packet[0] = '{';
-    ble_packet[PACKET_LENGTH - 1] = '}';
-    for (uint8_t i = 1; i < PACKET_LENGTH - 1; i++) {
-        ble_packet[i] = 0;
-    }
-
-    // Byte 1: Data type identifier
-    switch (ble_data_type) {
-        case DATA_TYPE_IMU_ACCELERATION:
-            ble_packet[1] = 'A';
-            break;
-        case DATA_TYPE_IMU_GYROSCOPE:
-            ble_packet[1] = 'G';
-            break;
-        default:
-            ble_packet[1] = 'U'; // Unknown data type
-            break;
-    }
-
-    // Bytes 2-4: The 32-bit value, packed in big-endian format
-    ble_packet[2] = data_buffer[0]; // X Axis LSB
-    ble_packet[3] = data_buffer[1]; // X Axis MSB
-    ble_packet[4] = data_buffer[2]; // Y Axis LSB
-    ble_packet[5] = data_buffer[3]; // Y Axis MSB
-    ble_packet[6] = data_buffer[4]; // Z Axis LSB
-    ble_packet[7] = data_buffer[5]; // Z Axis MSB
-
-    // Send the complete packet over UART
-    BLE_SendData(ble_packet, sizeof(ble_packet));
-}
-
-// --- Helper Function Implementations ---
-// These helper functions encapsulate common, repeated tasks to improve code clarity.
-
-/**
- * @brief Helper function to enter Command Mode.
- *
- * Sends the `$$$` sequence to the module to switch from Data Mode to Command Mode.
- */
-static void enter_command_mode(void) {
-    uint8_t command_mode_sequence[] = "$$$";
-    uint8_t command_prompt_response[5] = {0};
-    BLE_SendData(command_mode_sequence, sizeof(command_mode_sequence) - 1);
-    HAL_UART_Receive(&huart3, command_prompt_response, sizeof(command_prompt_response), UART_TIMEOUT);
     HAL_Delay(100);
 }
 
-/**
- * @brief Helper function to exit Command Mode.
- *
- * Sends the `---` command to the module to switch back to Data Mode.
- */
-static void exit_command_mode(void) {
+void BLE_WakeUp(void)
+{
+    HAL_GPIO_WritePin(BLE_UART_RX_IND_GPIO_Port, BLE_UART_RX_IND_Pin, GPIO_PIN_RESET);
+    HAL_Delay(5);
+    BLE_Initialize();
+}
+
+void BLE_EnterLowPowerMode(void)
+{
+    uint8_t command_ok_response[100] = {0};
+    enter_command_mode();
+    uint8_t low_power_command[] = "SO,1\r";
+    BLE_SendData(low_power_command, sizeof(low_power_command) - 1);
+    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
+    exit_command_mode();
+}
+
+void BLE_ExitLowPowerMode(void)
+{
+    uint8_t command_ok_response[100] = {0};
+    enter_command_mode();
+    uint8_t exit_low_power_command[] = "SO,0\r";
+    BLE_SendData(exit_low_power_command, sizeof(exit_low_power_command) - 1);
+    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
+    exit_command_mode();
+}
+
+void BLE_SetSlowAdvertisements(void)
+{
+    uint8_t command_ok_response[100] = {0};
+    enter_command_mode();
+    uint8_t slow_ads_command[] = "A,03E8,002F\r";
+    BLE_SendData(slow_ads_command, sizeof(slow_ads_command) - 1);
+    HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
+    exit_command_mode();
+}
+
+void BLE_SendData(uint8_t *data, uint8_t data_length)
+{
+    HAL_UART_Transmit(&huart3, data, data_length, UART_TIMEOUT);
+}
+
+void BLE_ReceiveData(uint8_t *data, uint8_t data_length)
+{
+    HAL_UART_Receive(&huart3, data, data_length, UART_TIMEOUT);
+}
+
+/* --- Public: typed packet senders ---------------------------------------- */
+
+void BLE_SendImuAccelPacket(const BLE_ImuAccelPayload *payload)
+{
+    /*
+     * IMU Accelerometer packet — MsgType 0x41 ('A')
+     *
+     *   [0]    0x7B
+     *   [1]    0x41
+     *   [2-3]  ax  (Int16-LE)
+     *   [4-5]  ay  (Int16-LE)
+     *   [6-7]  az  (Int16-LE)
+     *   [8-9]  stepCount (UInt16-LE)
+     *   [10-18] 0x00
+     *   [19]   0x7D
+     */
+    uint8_t pkt[PACKET_LENGTH];
+    init_packet(pkt, (uint8_t)DATA_TYPE_IMU_ACCELERATION);
+
+    put_i16le(&pkt[2], payload->ax);
+    put_i16le(&pkt[4], payload->ay);
+    put_i16le(&pkt[6], payload->az);
+    put_u16le(&pkt[8], payload->step_count);
+
+    BLE_SendData(pkt, PACKET_LENGTH);
+}
+
+void BLE_SendImuGyroPacket(const BLE_ImuGyroPayload *payload)
+{
+    /*
+     * IMU Gyroscope packet — MsgType 0x47 ('G')
+     *
+     *   [0]    0x7B
+     *   [1]    0x47
+     *   [2-3]  gx  (Int16-LE)
+     *   [4-5]  gy  (Int16-LE)
+     *   [6-7]  gz  (Int16-LE)
+     *   [8-18] 0x00
+     *   [19]   0x7D
+     */
+    uint8_t pkt[PACKET_LENGTH];
+    init_packet(pkt, (uint8_t)DATA_TYPE_IMU_GYROSCOPE);
+
+    put_i16le(&pkt[2], payload->gx);
+    put_i16le(&pkt[4], payload->gy);
+    put_i16le(&pkt[6], payload->gz);
+
+    BLE_SendData(pkt, PACKET_LENGTH);
+}
+
+void BLE_SendLightPacket(const BLE_LightPayload *payload)
+{
+    /*
+     * Light sensor packet — MsgType 0x4C ('L')
+     *
+     *   [0]    0x7B
+     *   [1]    0x4C
+     *   [2-3]  uv_risk              → app f1 (uvRisk)
+     *   [4-5]  blue_light_intensity → app f2 (blueLightIntensity)
+     *   [6-7]  blue_light_ratio     → app f3 (blueLightRatio)
+     *   [8-9]  sun_like_index       → app f4 (sunLikeIndex)
+     *   [10-11] metric1_clear       → app f5 (metric1)
+     *   [12-18] 0x00
+     *   [19]   0x7D
+     */
+    uint8_t pkt[PACKET_LENGTH];
+    init_packet(pkt, (uint8_t)DATA_TYPE_LIGHT);
+
+    put_u16le(&pkt[2],  payload->uv_risk);
+    put_u16le(&pkt[4],  payload->blue_light_intensity);
+    put_u16le(&pkt[6],  payload->blue_light_ratio);
+    put_u16le(&pkt[8],  payload->sun_like_index);
+    put_u16le(&pkt[10], payload->metric1_clear);
+
+    BLE_SendData(pkt, PACKET_LENGTH);
+}
+
+/* Legacy generic packet sender (kept for backward compatibility). */
+void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t *data_buffer)
+{
+    uint8_t pkt[PACKET_LENGTH];
+    init_packet(pkt, (uint8_t)ble_data_type);
+
+    /* Preserve old behaviour: copy 6 axis bytes at [2..7]. */
+    pkt[2] = data_buffer[0];
+    pkt[3] = data_buffer[1];
+    pkt[4] = data_buffer[2];
+    pkt[5] = data_buffer[3];
+    pkt[6] = data_buffer[4];
+    pkt[7] = data_buffer[5];
+
+    BLE_SendData(pkt, PACKET_LENGTH);
+}
+
+/* --- Internal helpers ---------------------------------------------------- */
+
+static void enter_command_mode(void)
+{
+    uint8_t command_mode_sequence[] = "$$$";
+    uint8_t command_prompt_response[5] = {0};
+    BLE_SendData(command_mode_sequence, sizeof(command_mode_sequence) - 1);
+    HAL_UART_Receive(&huart3, command_prompt_response,
+                     sizeof(command_prompt_response), UART_TIMEOUT);
+    HAL_Delay(100);
+}
+
+static void exit_command_mode(void)
+{
     uint8_t data_mode_command[] = "---\r";
-    //uint8_t command_ok_response[100] = {0};
     BLE_SendData(data_mode_command, sizeof(data_mode_command) - 1);
-    //HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
     HAL_Delay(100);
 }
