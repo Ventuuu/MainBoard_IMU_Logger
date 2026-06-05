@@ -118,7 +118,7 @@ void LightMetrics_Update(const AS7341_Spectrum *spectrum,
         s_blueExposureNaturalAccum += (uint64_t)s_blueWeightedIll;
     }
 
-    /* --- Circadian dose: only inside [20:00, 24:00) ----------------------- */
+    /* --- Circadian dose: only inside [20:00, 24:00) ----------------------- probably we'll not use it, the app will take care of accumilating the blue-light dose*/
     uint32_t seconds_of_day = ((uint32_t)timestamp->hh * 3600U)
                             + ((uint32_t)timestamp->mm * 60U)
                             + (uint32_t)timestamp->ss;
