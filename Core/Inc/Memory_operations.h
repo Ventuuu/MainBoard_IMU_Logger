@@ -65,5 +65,97 @@ void write_packet(uint16_t sample, Time_Struct timestamp,
 void erase_memory(void);
 void write_memory(void);
 void read_memory_and_transmit(void);
+void write_audio_page(int16_t *audio_buffer, uint32_t audio_samples);
+
+
+typedef enum
+{
+    LOG_OK = 0,
+    LOG_ERR_FULL,
+    LOG_ERR_NO_GOOD_BLOCKS,
+    LOG_ERR_BAD_ARGUMENT,
+    LOG_ERR_NAND
+} LogStatus;
+
+
+#define NAND_TOTAL_BLOCKS        2048U
+#define NAND_PAGES_PER_BLOCK     64U
+#define NAND_PAGE_SIZE_BYTES     4096U
+
+#define LOG_HEADER_SIZE_BYTES    16U
+#define LOG_SENSOR_PAYLOAD_BYTES (NAND_PAGE_SIZE_BYTES - LOG_HEADER_SIZE_BYTES)
+#define LOG_SENSOR_RECORD_BYTES  40U
+#define LOG_SENSOR_RECORDS_PER_PAGE (LOG_SENSOR_PAYLOAD_BYTES / LOG_SENSOR_RECORD_BYTES)
+
+#define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
+#define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
+
+typedef enum
+{
+    LOG_OK = 0,
+    LOG_ERR_FULL,
+    LOG_ERR_NO_GOOD_BLOCKS,
+    LOG_ERR_BAD_ARGUMENT,
+    LOG_ERR_NAND
+} LogStatus;
+
+
+#define NAND_TOTAL_BLOCKS        2048U
+#define NAND_PAGES_PER_BLOCK     64U
+#define NAND_PAGE_SIZE_BYTES     4096U
+
+#define LOG_HEADER_SIZE_BYTES    16U
+#define LOG_SENSOR_PAYLOAD_BYTES (NAND_PAGE_SIZE_BYTES - LOG_HEADER_SIZE_BYTES)
+#define LOG_SENSOR_RECORD_BYTES  40U
+#define LOG_SENSOR_RECORDS_PER_PAGE (LOG_SENSOR_PAYLOAD_BYTES / LOG_SENSOR_RECORD_BYTES)
+
+#define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
+#define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
+
+
+typedef struct __attribute__((packed))
+{
+    uint32_t magic;
+    uint8_t  version;
+    uint8_t  header_size;
+    uint16_t payload_bytes;
+    uint32_t page_sequence;
+    uint32_t timestamp_ms;
+} LogPageHeader;
+
+
+typedef struct
+{
+    uint16_t good_blocks[NAND_TOTAL_BLOCKS];
+    uint16_t good_block_count;
+
+    uint16_t current_good_block_index;
+    uint8_t  current_page_in_block;
+
+    uint32_t page_sequence;
+
+    uint8_t sensor_page_buffer[NAND_PAGE_SIZE_BYTES];
+    uint16_t sensor_records_in_page;
+} NandLogger;
+
+
+LogStatus NANDLogger_Init(NandLogger *logger);
+
+LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger);
+
+LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,
+                                        Time_Struct timestamp,
+                                        const uint8_t *accelerometer,
+                                        const uint8_t *gyroscope,
+                                        const uint8_t *light_raw);
+
+LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
+                                       const int16_t *audio_buffer,
+                                       uint32_t audio_samples,
+                                       uint32_t timestamp_ms);
+
+LogStatus NANDLogger_DownloadAll(NandLogger *logger);
+LogStatus NANDLogger_Flush(NandLogger *logger, uint32_t timestamp_ms);
+
 
 #endif /* INC_MEMORY_OPERATIONS_H_ */

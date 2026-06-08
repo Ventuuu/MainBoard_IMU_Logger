@@ -116,19 +116,7 @@ static uint8_t light_tick = 0; /* subsample counter */
 
 /// ----- NAND FLASH variables ----- ///
 
-uint8_t NAND_packet[4096] = {0};
-uint16_t sample = 0;
-uint16_t blocco_scritto = 0;
-uint8_t pagina_scritta=0;
-uint16_t b = 0;
-
-read_address_t blocco;
-column_address_t colonna = 0;
-
-uint16_t bad_blocks[2048]={-1};
-uint8_t bad_blocks2[2048]={0};
-
-uint8_t data_letto[4096] = {0};
+static NandLogger nand_logger;
 int exit_flag = 0;
 
 // Timestamp variables //
@@ -208,7 +196,10 @@ int main(void)
   HAL_Delay(1000);
 
   spi_nand_init();
-  find_bad_blocks(bad_blocks);
+  if (NANDLogger_Init(&nand_logger) != LOG_OK) {
+    Error_Handler();
+}
+
 
   if(IMU_Init() == 1) {
     IMU_ConfigAccelerometer(ACC_ODR_52HZ, ACC_FS_2G, 1);
@@ -271,23 +262,19 @@ int main(void)
 
           if (audio_buffer_ready)
           {
-            audio_buffer_ready = 0U;
+          audio_buffer_ready = 0U;
 
-            memset(NAND_packet, 0, sizeof(NAND_packet));
-
-            memcpy(NAND_packet,
-               (uint8_t *)audio_buffer,
-               AUDIO_BUFFER_SIZE * sizeof(int16_t));
-
-            /*
-              * Qui serve una funzione che scriva NAND_packet nella NAND.
-              * Non posso affermare che write_memory() sia sufficiente
-             * senza vedere Memory_operations.c/.h.
-              */
-
-            current_state = STATE_IDLE;
-            LED_Off(LED_GREEN);
-          }
+            if (NANDLogger_AppendAudioBuffer(&nand_logger,
+                                     audio_buffer,
+                                     AUDIO_BUFFER_SIZE,
+                                     Time_ToMilliseconds(timestamp)) != LOG_OK) 
+            {
+              Error_Handler();
+            }
+         /*
+          * Se vuoi acquisizione continua, NON tornare subito a STATE_IDLE.
+          */
+           }
           else if (!microphone_active)
           {
             if (HAL_MDF_AcqStart_DMA(&MdfHandle0,
@@ -306,7 +293,10 @@ int main(void)
 	  		 break;
 
 	  	  case STATE_DOWNLOAD:
-	  		  read_memory_and_transmit();
+	  		  if (NANDLogger_DownloadAll(&nand_logger) != LOG_OK) 
+          { 
+          Error_Handler();
+          }
 			 current_state = STATE_USB_CONNECTED;
 	  		 break;
 	  }
@@ -384,40 +374,51 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			}
 		}
 		tim++;
+    
+    if (NANDLogger_AppendSensorRecord(&nand_logger,
+                                  timestamp,
+                                  raw_accelerometer,
+                                  raw_gyroscope,
+                                  raw_light) != LOG_OK) {
+      HAL_TIM_Base_Stop_IT(&htim2);
+      current_state = STATE_IDLE;
+      LED_Off(LED_GREEN);
+      LED_On(LED_RED);
+    }
 
-		/* --- Pack and save to NAND (IMU + light) --- */
-		write_packet(sample, timestamp, raw_accelerometer, raw_gyroscope, raw_light, NAND_packet);
-		sample++;
-        write_memory();
-	}
+  }
 }
 
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == USER_BUTTON_Pin)
-	{
-		switch(current_state) {
+  {
+		switch(current_state) 
+    {
 			case STATE_IDLE:
-				erase_memory();
+				if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK) 
+        {
+          Error_Handler();
+        }
 				current_state = STATE_ACQUISITION;
 				HAL_TIM_Base_Start_IT(&htim2);
 				LED_On(LED_GREEN);
-			break;
+			  break;
 			case STATE_ACQUISITION:
 				current_state = STATE_IDLE;
 				HAL_TIM_Base_Stop_IT(&htim2);
 				LED_Off(LED_GREEN);
-				break;
+			  break;
 			case STATE_USB_CONNECTED:
 				exit_flag = 0;
 				current_state = STATE_DOWNLOAD;
-				break;
+			  break;
 			default:
-				break;
+        current_state = STATE_IDLE;
+			  break;
 		}
-	}
+  }
 }
-
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == USER_BUTTON_Pin)
