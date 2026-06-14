@@ -715,6 +715,9 @@ int spi_write(uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
     return r;
 }
 
+// al posto che eliminarle le metto come commenti
+
+#if 0
 
 void write_memory()
 {
@@ -783,5 +786,5 @@ void erase_memory()
 	erase_good_blocks(bad_blocks2); // Erase bad_blocks (set all memory to 0xFF)
 }
 
-
+#endif
 

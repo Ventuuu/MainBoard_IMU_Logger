@@ -34,6 +34,16 @@
 #include "usbd_cdc_if.h"
 
 
+uint8_t audio_NAND_packet[4096] = {0};
+uint8_t audio_pagina_scritta = 0;
+uint16_t audio_b = 0;
+uint16_t audio_blocco_scritto = 0;
+
+read_address_t audio_blocco;
+column_address_t audio_colonna = 0;
+
+uint16_t bad_blocks[2048] = {0};
+uint8_t bad_blocks2[2048] = {0};
 
 /* -------------------------------------------------------------------------- */
 /*                              Legacy globals                                */

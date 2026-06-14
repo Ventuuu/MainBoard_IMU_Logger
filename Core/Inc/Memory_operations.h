@@ -90,15 +90,6 @@ typedef enum
 #define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
 #define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
 
-typedef enum
-{
-    LOG_OK = 0,
-    LOG_ERR_FULL,
-    LOG_ERR_NO_GOOD_BLOCKS,
-    LOG_ERR_BAD_ARGUMENT,
-    LOG_ERR_NAND
-} LogStatus;
-
 
 #define NAND_TOTAL_BLOCKS        2048U
 #define NAND_PAGES_PER_BLOCK     64U
