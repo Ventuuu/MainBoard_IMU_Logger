@@ -1,0 +1,7 @@
+/**
+ * \file microphone_driver.c
+ * \brief Implementation file for the microphone driver library.
+ *
+ * This file contains the implementation of functions for controlling the state
+ * of the Microphone
+ */

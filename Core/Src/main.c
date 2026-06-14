@@ -23,6 +23,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "pdm_microphone.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -71,6 +72,9 @@ UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
+
+// Local Puffer for converted UART-data (half of the size)
+int16_t UartTxBuffer[AUDIO_REC_BUFF_SIZE / 2];
 /* USER CODE BEGIN PV */
 
 // --- State Machine ---
@@ -208,7 +212,16 @@ int main(void)
   LED_Off(LED_RED);
 
   /* USER CODE END 2 */
+  // initialize Microphone with triber
+    if (PDM_Microphone_Init(&MdfHandle0) != HAL_OK) {
+        Error_Handler();
+    }
 
+    // start Microphone-recording 
+    //if (PDM_Microphone_Start(&MdfHandle0) != HAL_OK) {
+    if (PDM_Microphone_Start(&MdfHandle0, &huart3) != HAL_OK){
+    Error_Handler();
+    }
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -424,7 +437,7 @@ static void MX_MDF1_Init(void)
 
     WARNING : only structures are filled, no specific init function call for filter
   */
-  MdfFilterConfig0.DataSource = MDF_DATA_SOURCE_BSMX;
+  /**MdfFilterConfig0.DataSource = MDF_DATA_SOURCE_BSMX;
   MdfFilterConfig0.Delay = 0;
   MdfFilterConfig0.CicMode = MDF_ONE_FILTER_SINC5;
   MdfFilterConfig0.DecimationRatio = 16;
@@ -441,6 +454,7 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.DiscardSamples = 255;
   MdfFilterConfig0.Trigger.Source = MDF_CLOCK_TRIG_TRGO;
   MdfFilterConfig0.Trigger.Edge = MDF_FILTER_TRIG_RISING_EDGE;
+  */
   /* USER CODE BEGIN MDF1_Init 2 */
 
   /* USER CODE END MDF1_Init 2 */
