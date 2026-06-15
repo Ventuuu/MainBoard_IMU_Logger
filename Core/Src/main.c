@@ -452,8 +452,14 @@ void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 void Error_Handler(void)
 {
   __disable_irq();
-  while (1) {}
+
+  while (1)
+  {
+    LED_Toggle(LED_RED);
+    HAL_Delay(200);
+  }
 }
+
 
 #ifdef USE_FULL_ASSERT
 void assert_failed(uint8_t *file, uint32_t line)
