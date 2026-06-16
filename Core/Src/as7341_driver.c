@@ -43,7 +43,6 @@ uint8_t AS7341_Init(void) {
 
     /* Power on */
     if (!as7341_write_register(AS7341_REG_ENABLE, AS7341_PON)) return 0;
-    HAL_Delay(5);
 
     /* Default timing/gain similar to previous implementation: ATIME=29, ASTEP=599, GAIN=x8 */
     AS7341_ConfigTimingAndGain(29U, 599U, AS7341_GAIN_8X);
@@ -182,7 +181,6 @@ uint16_t AS7341_DetectMainsHz(void) {
         if (status != 0U) {
             return as7341_decode_flicker_mains(status);
         }
-        HAL_Delay(10U);
     }
 
     /* Timeout or no valid flicker detected. */
@@ -212,7 +210,6 @@ static uint8_t as7341_wait_avalid(uint32_t timeout_ms) {
     while ((HAL_GetTick() - start) < timeout_ms) {
         as7341_read_register(AS7341_REG_STATUS2, &status, 1);
         if (status & AS7341_AVALID) return 1;
-        HAL_Delay(2);
     }
     return 0;
 }
