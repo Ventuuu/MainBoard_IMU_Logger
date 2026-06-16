@@ -266,43 +266,46 @@ MX_SPI3_Init();
           if (!usb_flag)
           {
           /* existing idle behavior */
-          }
-          else
-          {
+        }
+        else
+        {
           current_state = STATE_USB_CONNECTED;
           LED_On(LED_GREEN);
-          }     
-          break;
-
-	  	  case STATE_ACQUISITION:
-
-          if (audio_buffer_ready)
-          {
+        }     
+        break;
+        
+        case STATE_ACQUISITION:
+        
+        if (audio_buffer_ready)
+        {
           audio_buffer_ready = 0U;
+          
+          if (NANDLogger_AppendAudioBuffer(&nand_logger,
+          audio_buffer,
+          AUDIO_BUFFER_SIZE,
+          Time_ToMilliseconds(timestamp)) != LOG_OK) 
+          {
 
-            if (NANDLogger_AppendAudioBuffer(&nand_logger,
-                                     audio_buffer,
-                                     AUDIO_BUFFER_SIZE,
-                                     Time_ToMilliseconds(timestamp)) != LOG_OK) 
-            {
-              Error_Handler();
-            }
-         /*
-          * Se vuoi acquisizione continua, NON tornare subito a STATE_IDLE.
-          */
-           }
+            Error_Handler();
+          }
+
+            /*
+            * Se vuoi acquisizione continua, NON tornare subito a STATE_IDLE.
+            */
+          }
           else if (!microphone_active)
           {
             if (HAL_MDF_AcqStart_DMA(&MdfHandle0,
-                                 &MdfFilterConfig0,
-                                 &mic_dma_config) != HAL_OK)
-            {
-            Error_Handler();
+              &MdfFilterConfig0,
+              &mic_dma_config) != HAL_OK)
+              {
+                Error_Handler();
+              }
+              
+              microphone_active = 1U;
             }
-
-            microphone_active = 1U;
-          }
-
+            
+            
           break;
 
 	  	  case STATE_USB_CONNECTED:
@@ -362,16 +365,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
                 raw_light[18] = (uint8_t)(nir & 0xFFU);
                 raw_light[19] = (uint8_t)(nir >> 8);
             }
-
+            
             /* Flicker: use on-chip flicker engine to classify mains freq
-             * into {0, 50, 60} Hz equivalents. */
+            * into {0, 50, 60} Hz equivalents. */
             uint16_t mains_hz = AS7341_DetectMainsHz();
             raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
             raw_light[21] = (uint8_t)(mains_hz >> 8);
-
+            
             /* Update MCU-side exposure metrics for this light sample,
-             * using flicker classification to split artificial vs natural
-             * and to gate circadian dose. */
+            * using flicker classification to split artificial vs natural
+            * and to gate circadian dose. */
             LightMetrics_Update(&spectrum, &timestamp, mains_hz); //, mains_hz
         }
 
@@ -395,15 +398,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			}
 		}
 		tim++;
-    
+    /*
     if (NANDLogger_AppendSensorRecord(&nand_logger,
-                                  timestamp,
-                                  raw_accelerometer,
-                                  raw_gyroscope,
-                                  raw_light) != LOG_OK) {
+    timestamp,
+    raw_accelerometer,
+    raw_gyroscope,
+    raw_light) != LOG_OK) {
       HAL_TIM_Base_Stop_IT(&htim2);
       current_state = STATE_IDLE;
     }
+    */
 
   }
 }
