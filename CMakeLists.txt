@@ -1,12 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-set(CMAKE_SYSTEM_NAME Generic)
-set(CMAKE_SYSTEM_PROCESSOR arm)
 
-set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-
-set(CMAKE_C_COMPILER arm-none-eabi-gcc)
-set(CMAKE_ASM_COMPILER arm-none-eabi-gcc)
-set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
 #
 # This file is generated only once,
 # and is not re-generated if converter is called multiple times.
@@ -33,20 +26,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
-add_compile_options(
-    -mcpu=cortex-m33
-    -mthumb
-    -mfpu=fpv5-sp-d16
-    -mfloat-abi=hard
-)
-
-add_link_options(
-    -mcpu=cortex-m33
-    -mthumb
-    -mfpu=fpv5-sp-d16
-    -mfloat-abi=hard
-    "LINKER:-T,${CMAKE_SOURCE_DIR}/STM32U575RITXQ_FLASH.ld"
-)
 
 message("Build type: " ${CMAKE_BUILD_TYPE})
 

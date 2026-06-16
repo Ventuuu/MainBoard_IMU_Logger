@@ -33,6 +33,9 @@
 #include "Memory_operations.h"
 #include "usbd_cdc_if.h"
 
+#include "led_driver.h"
+
+
 
 uint8_t audio_NAND_packet[4096] = {0};
 uint8_t audio_pagina_scritta = 0;
@@ -389,46 +392,49 @@ LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
                                        uint32_t audio_samples,
                                        uint32_t timestamp_ms)
 {
+    
+    LED_On(LED_RED);
+    
     uint32_t audio_bytes;
-
+    
     if ((logger == NULL) || (audio_buffer == NULL))
     {
         return LOG_ERR_BAD_ARGUMENT;
     }
-
+    
     if (logger->current_good_block_index >= logger->good_block_count)
     {
         return LOG_ERR_FULL;
     }
-
+    
     audio_bytes = audio_samples * sizeof(int16_t);
-
+    
     if (audio_bytes > (NAND_PAGE_SIZE_BYTES - LOG_HEADER_SIZE_BYTES))
     {
         return LOG_ERR_BAD_ARGUMENT;
     }
-
+    
     /*
-     * Audio is written as a complete page:
-     *
-     * [0..15]   LogPageHeader with LOG_MAGIC_AUDIO
-     * [16..]    PCM int16_t samples
-     */
+    * Audio is written as a complete page:
+    *
+    * [0..15]   LogPageHeader with LOG_MAGIC_AUDIO
+    * [16..]    PCM int16_t samples
+    */
     memset(logger_audio_page_buffer, 0xFF, sizeof(logger_audio_page_buffer));
-
+    
     logger_prepare_header(logger_audio_page_buffer,
-                          LOG_MAGIC_AUDIO,
-                          (uint16_t)audio_bytes,
-                          logger->page_sequence,
-                          timestamp_ms);
-
-    memcpy(&logger_audio_page_buffer[LOG_HEADER_SIZE_BYTES],
-           (const uint8_t *)audio_buffer,
-           audio_bytes);
-
-    return logger_write_current_page(logger,
-                                     logger_audio_page_buffer);
-}
+        LOG_MAGIC_AUDIO,
+        (uint16_t)audio_bytes,
+        logger->page_sequence,
+        timestamp_ms);
+        
+        memcpy(&logger_audio_page_buffer[LOG_HEADER_SIZE_BYTES],
+            (const uint8_t *)audio_buffer,
+            audio_bytes);
+            
+            return logger_write_current_page(logger,
+                logger_audio_page_buffer);   
+            }
 
 LogStatus NANDLogger_Flush(NandLogger *logger, uint32_t timestamp_ms)
 {
@@ -448,17 +454,19 @@ static LogStatus logger_usb_send(const uint8_t *data, uint16_t len)
 
     while (CDC_Transmit_FS((uint8_t *)data, len) == USBD_BUSY)
     {
+        
         if ((HAL_GetTick() - start_tick) > 1000U)
         {
             return LOG_ERR_NAND;
         }
+        
     }
 
     /*
      * Delay breve per non saturare la USB CDC.
      * Dopo i primi test puoi ridurlo o rimuoverlo.
      */
-    HAL_Delay(1U);
+    //HAL_Delay(1U);
 
     return LOG_OK;
 }

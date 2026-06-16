@@ -15,6 +15,8 @@
 #include "SPI.h"
 #include "SPI_NAND.h"
 
+#include "led_driver.h"
+
 /*
  * Packet layout per sample (STRIDE_BYTES_PER_SAMPLE = 40, effective BYTES_PER_SAMPLE = 40):
  *   [0]      hh  (timestamp hours)
