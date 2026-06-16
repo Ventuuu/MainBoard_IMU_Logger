@@ -187,19 +187,22 @@ int main(void)
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
+MX_GPIO_Init();
 
-  MX_GPIO_Init();
-  MX_ICACHE_Init();
-  MX_I2C3_Init();
-  MX_USART3_UART_Init();
-  MX_USB_OTG_FS_PCD_Init();
-  MX_MDF1_Init();
-  MX_TIM2_Init();
-  MX_SPI2_Init();
-  MX_SPI3_Init();
-  /* USER CODE BEGIN 2 */
+LED_On(LED_RED);
+HAL_Delay(5000);
 
-  LED_On(LED_RED);
+MX_ICACHE_Init();
+MX_I2C3_Init();
+MX_USART3_UART_Init();
+MX_USB_OTG_FS_PCD_Init();
+MX_MDF1_Init();
+MX_TIM2_Init();
+MX_SPI2_Init();
+MX_SPI3_Init();
+
+/* USER CODE BEGIN 2 */
+
 
   BLE_Initialize();
   MX_USB_Device_Init();
@@ -447,8 +450,14 @@ void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 void Error_Handler(void)
 {
   __disable_irq();
-  while (1) {}
+
+  while (1)
+  {
+    LED_Toggle(LED_RED);
+    HAL_Delay(200);
+  }
 }
+
 
 #ifdef USE_FULL_ASSERT
 void assert_failed(uint8_t *file, uint32_t line)
