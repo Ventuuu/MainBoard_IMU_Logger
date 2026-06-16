@@ -52,7 +52,7 @@ typedef struct Time
 } Time_Struct;
 
 void find_bad_blocks(uint16_t *bad_blocks);
-void erase_good_blocks(uint8_t *bad_blocks);
+void erase_bad_blocks(uint8_t *bad_blocks);
 NAND_info read_memory(int b, NAND_info indice, uint16_t *blocco_letto, uint8_t *pagina_letta, uint16_t bad_blocks[2048], uint8_t *data_letto);
 void write_info(NAND_info segnalibro, uint16_t bad_blocks[2048]);
 NAND_info read_info(uint16_t bad_blocks[2048]);

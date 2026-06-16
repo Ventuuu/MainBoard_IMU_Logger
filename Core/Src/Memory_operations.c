@@ -38,7 +38,7 @@ void find_bad_blocks(uint16_t *bad_blocks){
 	}
 }
 
-void erase_good_blocks(uint8_t *bad_blocks){
+void erase_bad_blocks(uint8_t *bad_blocks){
 	read_address_t blocco;
 	blocco.block=0;
 	blocco.page=0;

@@ -782,6 +782,6 @@ void read_memory_and_transmit()
 
 void erase_memory()
 {
-	erase_good_blocks(bad_blocks2); // Erase bad_blocks (set all memory to 0xFF)
+	erase_bad_blocks(bad_blocks2); // Erase bad_blocks (set all memory to 0xFF)
 }
 
