@@ -85,14 +85,17 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 int16_t audio_buffer[AUDIO_BUFFER_SIZE];
 MDF_DmaConfigTypeDef mic_dma_config;
 
-static uint8_t microphone_active = 0U;
-volatile uint8_t audio_buffer_ready = 0U;
+static volatile uint8_t microphone_active = 0U;
+static volatile uint8_t audio_buffer_ready = 0U;
 
 // --- State Machine ---
-static AppState current_state = STATE_IDLE;
+static volatile AppState current_state = STATE_IDLE;
 
 // --- Global Flags ---
-uint8_t usb_flag = 0;
+volatile uint8_t usb_flag = 0U;
+static volatile uint8_t start_acquisition_requested = 0U;
+static volatile uint8_t stop_acquisition_requested = 0U;
+static volatile uint32_t sensor_tick_pending = 0U;
 
 // --- IMU data ---
 static IMU_Data accelerometer_data;
@@ -155,13 +158,125 @@ static uint32_t Time_ToMilliseconds(Time_Struct t)
 //--michrophone acquisition complete callback: set flag and stop acquisition to prevent overwriting buffer before processing ----//
 void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 {
-    if (hmdf == &MdfHandle0)
+    if (hmdf != &MdfHandle0)
+    {
+        return;
+    }
+
+    microphone_active = 0U;
+
+    if (current_state == STATE_ACQUISITION)
     {
         audio_buffer_ready = 1U;
-        microphone_active = 0U;
+    }
+    else
+    {
+        audio_buffer_ready = 0U;
     }
 }
 /* USER CODE END 0 */
+static void StopAcquisition(void)
+{
+    HAL_TIM_Base_Stop_IT(&htim2);
+
+    if (microphone_active)
+    {
+        HAL_MDF_AcqStop_DMA(&MdfHandle0);
+        microphone_active = 0U;
+    }
+
+    audio_buffer_ready = 0U;
+    sensor_tick_pending = 0U;
+    stop_acquisition_requested = 0U;
+
+    current_state = STATE_IDLE;
+
+    LED_Off(LED_GREEN);
+    LED_On(LED_BLUE);
+}
+
+static void ProcessSensorTick(void)
+{
+    /* --- Read IMU --- */
+    IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
+    IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
+
+    /* --- Read light sensor every LIGHT_SUBSAMPLE ticks --- */
+    light_tick++;
+
+    if (light_tick >= LIGHT_SUBSAMPLE)
+    {
+        light_tick = 0U;
+
+        if (AS7341_ReadFullSpectrum(&spectrum))
+        {
+            for (uint8_t i = 0U; i < 8U; i++)
+            {
+                uint16_t v = spectrum.ch[i];
+
+                raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
+                raw_light[2U * i + 1U] = (uint8_t)(v >> 8U);
+            }
+
+            uint16_t clear = spectrum.ch[8];
+            uint16_t nir   = spectrum.ch[9];
+
+            raw_light[16] = (uint8_t)(clear & 0xFFU);
+            raw_light[17] = (uint8_t)(clear >> 8U);
+
+            raw_light[18] = (uint8_t)(nir & 0xFFU);
+            raw_light[19] = (uint8_t)(nir >> 8U);
+        }
+
+        uint16_t mains_hz = AS7341_DetectMainsHz();
+
+        raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
+        raw_light[21] = (uint8_t)(mains_hz >> 8U);
+
+        LightMetrics_Update(&spectrum, &timestamp, mains_hz);
+    }
+
+    /* --- BLE transmission --- */
+    BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
+    BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
+
+    /* --- Timestamp @ 100 Hz --- */
+    timestamp.sss = tim * 10U;
+
+    if (timestamp.sss == 1000U)
+    {
+        timestamp.ss++;
+        timestamp.sss = 0U;
+        tim = 0U;
+
+        if (timestamp.ss == 60U)
+        {
+            timestamp.mm++;
+            timestamp.ss = 0U;
+
+            if (timestamp.mm == 60U)
+            {
+                timestamp.hh++;
+                timestamp.mm = 0U;
+            }
+        }
+    }
+
+    tim++;
+
+    /* --- NAND sensor logging --- */
+    if (NANDLogger_AppendSensorRecord(&nand_logger,
+                                      timestamp,
+                                      raw_accelerometer,
+                                      raw_gyroscope,
+                                      raw_light) != LOG_OK)
+    {
+        StopAcquisition();
+        LED_On(LED_RED);
+    }
+}
+
+
 
 /**
   * @brief  The application entry point.
@@ -256,48 +371,96 @@ MX_SPI3_Init();
 
 	  switch(current_state)
 	  {
-	  	  case STATE_IDLE:
-          if (microphone_active)
-          {
-          HAL_MDF_AcqStop_DMA(&MdfHandle0);
-          microphone_active = 0U;
-          }
+      case STATE_IDLE:
 
-          if (!usb_flag)
-          {
-          /* existing idle behavior */
-          }
-          else
-          {
-          current_state = STATE_USB_CONNECTED;
+        if (start_acquisition_requested)
+        {
+          start_acquisition_requested = 0U;
+
+          LED_Off(LED_BLUE);
           LED_On(LED_GREEN);
-          }     
+
+          if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
+          {
+            Error_Handler();
+          }
+          timestamp.hh = 0U;
+          timestamp.mm = 0U;
+          timestamp.ss = 0U;
+          timestamp.sss = 0U;
+
+          tim = 0U;
+          light_tick = 0U;
+          sensor_tick_pending = 0U;
+
+          audio_buffer_ready = 0U;
+          microphone_active = 0U;
+          stop_acquisition_requested = 0U;
+          current_state = STATE_ACQUISITION;
+          HAL_TIM_Base_Start_IT(&htim2);
+
           break;
+        }
+
+        HAL_TIM_Base_Stop_IT(&htim2);
+
+        if (microphone_active)
+        {
+        HAL_MDF_AcqStop_DMA(&MdfHandle0);
+        microphone_active = 0U;
+        }
+
+        audio_buffer_ready = 0U;
+
+        if (usb_flag)
+        {
+          current_state = STATE_USB_CONNECTED;
+
+          LED_Off(LED_BLUE);
+          LED_On(LED_GREEN);
+        }
+        else
+        {
+          LED_Off(LED_GREEN);
+          LED_On(LED_BLUE);
+        }
+
+        break;
 
         case STATE_ACQUISITION:
 
+          if (stop_acquisition_requested)
+          {
+              stop_acquisition_requested = 0U;
+              StopAcquisition();
+              break;
+          }
+          
+          while ((sensor_tick_pending > 0U) &&
+                  (current_state == STATE_ACQUISITION) &&
+                  (stop_acquisition_requested == 0U))
+          {
+            sensor_tick_pending--;
+             ProcessSensorTick();
+          }
+
+          if (stop_acquisition_requested)
+          {
+            stop_acquisition_requested = 0U;
+            StopAcquisition();
+            break;
+          }  
+        
           if (audio_buffer_ready && current_state == STATE_ACQUISITION)
           {
             audio_buffer_ready = 0U;
 
             if (NANDLogger_AppendAudioBuffer(&nand_logger,
-                                         audio_buffer,
-                                         AUDIO_BUFFER_SIZE,
-                                         Time_ToMilliseconds(timestamp)) != LOG_OK)
+                                 audio_buffer,
+                                 AUDIO_BUFFER_SIZE,
+                                 Time_ToMilliseconds(timestamp)) != LOG_OK)
             {
-              HAL_TIM_Base_Stop_IT(&htim2);
-
-              if (microphone_active)
-              {
-                HAL_MDF_AcqStop_DMA(&MdfHandle0);
-                microphone_active = 0U;
-              }
-
-              audio_buffer_ready = 0U;
-
-              current_state = STATE_IDLE;
-
-              LED_Off(LED_GREEN);
+              StopAcquisition();
               LED_On(LED_RED);
             }
           }
@@ -313,7 +476,7 @@ MX_SPI3_Init();
             microphone_active = 1U;
           }
 
-    break;
+          break;
 
 	  	  case STATE_USB_CONNECTED:
 	  		 break;
@@ -325,7 +488,7 @@ MX_SPI3_Init();
           }
 			 current_state = STATE_USB_CONNECTED;
 	  		 break;
-	  }
+    }
 
   }
   /* USER CODE END 3 */
@@ -343,79 +506,17 @@ MX_SPI3_Init();
   */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if(htim == &htim2){
-
-        /* --- Read IMU (always) --- */
-        IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
-        IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
-
-        /* --- Read light sensor (every LIGHT_SUBSAMPLE ticks = 10 Hz) --- */
-        light_tick++;
-        if (light_tick >= LIGHT_SUBSAMPLE) {
-            light_tick = 0;
-
-            /* Full spectrum: 12 channels (F1–F8, Clear, NIR) */
-            if (AS7341_ReadFullSpectrum(&spectrum)) {
-                /* Copy all 8 filter channels F1..F8 (indices 0..7 in spectrum) */
-                for (uint8_t i = 0; i < 8; i++) {
-                    uint16_t v = spectrum.ch[i];
-                    raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
-                    raw_light[2U * i + 1] = (uint8_t)(v >> 8);
-                }
-
-                /* Clear and NIR: use two of the remaining channels. Adjust
-                 * indices if you change SMUX mapping in as7341_driver.c. */
-                uint16_t clear = spectrum.ch[8];
-                uint16_t nir   = spectrum.ch[9];
-                raw_light[16] = (uint8_t)(clear & 0xFFU);
-                raw_light[17] = (uint8_t)(clear >> 8);
-                raw_light[18] = (uint8_t)(nir & 0xFFU);
-                raw_light[19] = (uint8_t)(nir >> 8);
-            }
-
-            /* Flicker: use on-chip flicker engine to classify mains freq
-             * into {0, 50, 60} Hz equivalents. */
-            uint16_t mains_hz = AS7341_DetectMainsHz();
-            raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
-            raw_light[21] = (uint8_t)(mains_hz >> 8);
-
-            /* Update MCU-side exposure metrics for this light sample,
-             * using flicker classification to split artificial vs natural
-             * and to gate circadian dose. */
-            LightMetrics_Update(&spectrum, &timestamp, mains_hz); //, mains_hz
-        }
-
-        /* --- BLE transmission (IMU only, unchanged for now) --- */
-        BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
-        BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
-
-        /* --- Timestamp @ 100 Hz --- */
-        timestamp.sss = tim * 10;
-		if(timestamp.sss == 1000) {
-			timestamp.ss++;
-			timestamp.sss = 0;
-			tim = 0;
-			if (timestamp.ss == 60){
-				timestamp.mm++;
-				timestamp.ss = 0;
-				if (timestamp.mm == 60){
-					timestamp.hh++;
-					timestamp.mm = 0;
-				}
-			}
-		}
-		tim++;
-    
-    if (NANDLogger_AppendSensorRecord(&nand_logger,
-                                  timestamp,
-                                  raw_accelerometer,
-                                  raw_gyroscope,
-                                  raw_light) != LOG_OK) {
-      HAL_TIM_Base_Stop_IT(&htim2);
-      current_state = STATE_IDLE;
+    if (htim != &htim2)
+    {
+        return;
     }
 
-  }
+    if (current_state != STATE_ACQUISITION)
+    {
+        return;
+    }
+
+    sensor_tick_pending++;
 }
 
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
@@ -425,29 +526,11 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 		switch(current_state) 
     {
 			case STATE_IDLE:
-				if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK) 
-        {
-          Error_Handler();
-        }
-				current_state = STATE_ACQUISITION;
-				HAL_TIM_Base_Start_IT(&htim2);
-				LED_On(LED_GREEN);
-			  break;
+        start_acquisition_requested = 1U;
+        break;
 			case STATE_ACQUISITION:
-        HAL_TIM_Base_Stop_IT(&htim2);
-
-        if (microphone_active)
-        {
-        HAL_MDF_AcqStop_DMA(&MdfHandle0);
-        microphone_active = 0U;
-        }
-
-        audio_buffer_ready = 0U;
-
-        current_state = STATE_IDLE;
-
-        LED_Off(LED_GREEN);
-       break;
+        stop_acquisition_requested = 1U;
+        break;
 			case STATE_USB_CONNECTED:
 				exit_flag = 0;
 				current_state = STATE_DOWNLOAD;
@@ -458,6 +541,7 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 		}
   }
 }
+
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == USER_BUTTON_Pin)

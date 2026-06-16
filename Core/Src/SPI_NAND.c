@@ -178,14 +178,19 @@ int block_erase(read_address_t row, uint32_t timeout)
 
     // wait until that operation finishes
     feature_reg_status_t status;
-    status = poll_for_oip_clear(SPI_TIMEOUT);
+	status = poll_for_oip_clear(timeout);
 
-    if (status.E_FAIL) { // otherwise, check for E_FAIL
-        return SPI_NAND_RET_E_FAIL;
-    }
-    else {
-        return SPI_NAND_RET_OK;
-    }
+	if (status.OIP)
+	{
+		return SPI_NAND_RET_BAD_SPI;
+	}
+
+	if (status.E_FAIL)
+	{
+		return SPI_NAND_RET_E_FAIL;
+	}
+
+	return SPI_NAND_RET_OK;
 }
 
 int read_id(void){
@@ -384,10 +389,15 @@ int page_read(read_address_t row, uint32_t timeout)
 	if (SPI_NAND_RET_OK != ret) return SPI_NAND_RET_BAD_SPI;
 
 	feature_reg_status_t status;
-	status = poll_for_oip_clear(SPI_TIMEOUT);
-	if (SPI_NAND_RET_OK != ret) return ret;
-    // check ecc
-    return get_ret_from_ecc_status(status);
+	status = poll_for_oip_clear(timeout);
+
+	if (status.OIP)
+	{
+		return SPI_NAND_RET_BAD_SPI;
+	}
+
+	/* check ecc */
+	return get_ret_from_ecc_status(status);
 
 }
 
@@ -534,18 +544,20 @@ int program_execute(read_address_t row, uint32_t timeout)
     cs_deselect();
     if (SPI_NAND_RET_OK != ret) return SPI_NAND_RET_BAD_SPI;
 
-    feature_reg_status_t status;
-    status = poll_for_oip_clear(timeout);
+   	feature_reg_status_t status;
+	status = poll_for_oip_clear(timeout);
 
-    if (SPI_NAND_RET_OK != ret) { // if polling failed, return that status
-        return ret;
-    }
-    else if (status.P_FAIL) { // otherwise, check for P_FAIL
-        return SPI_NAND_RET_P_FAIL;
-    }
-    else {
-        return SPI_NAND_RET_OK;
-    }
+	if (status.OIP)
+	{
+		return SPI_NAND_RET_BAD_SPI;
+	}
+
+	if (status.P_FAIL)
+	{
+		return SPI_NAND_RET_P_FAIL;
+	}
+
+	return SPI_NAND_RET_OK;
 }
 
 int set_feature(uint8_t reg, uint8_t data, uint32_t timeout)
@@ -616,30 +628,34 @@ int get_feature(uint8_t reg, uint32_t timeout)
 
 feature_reg_status_t poll_for_oip_clear(uint32_t timeout)
 {
-	/** \brief polling for OIP bit to be clear
-	 *
-	 *  */
+    uint8_t data = 0U;
+    uint32_t start_tick = HAL_GetTick();
 
-	uint8_t data=0;
-	feature_reg_status_t status_out;
-    for (;;) { // INFINITE CYCLE
-    	 //int ret = get_feature(FEATURE_REG_STATUS, &status_out->whole, timeout);
-    	data = get_feature(FEATURE_REG_STATUS, timeout);
+    feature_reg_status_t status_out = {0};
 
-    	status_out.OIP = data & 0b00000001;
-    	status_out.WEL = (data & 0b00000010)>>1;
-		status_out.E_FAIL = (data & 0b00000100)>>2;
-		status_out.P_FAIL = (data & 0b00001000)>>3;
-		status_out.ECCS0_3 = (data & 0b01110000)>>4;
-		status_out.CRBSY = 	(data & 0b10000000)>>7;
-    	 //if (SPI_NAND_RET_OK != ret) {
-           // return ret;
-        //}
-        // check for OIP clear
-        if (0 == status_out.OIP) {
+    while ((HAL_GetTick() - start_tick) < timeout)
+    {
+        data = (uint8_t)get_feature(FEATURE_REG_STATUS, timeout);
+
+        status_out.OIP     =  data        & 0x01U;
+        status_out.WEL     = (data >> 1U) & 0x01U;
+        status_out.E_FAIL  = (data >> 2U) & 0x01U;
+        status_out.P_FAIL  = (data >> 3U) & 0x01U;
+        status_out.ECCS0_3 = (data >> 4U) & 0x07U;
+        status_out.CRBSY   = (data >> 7U) & 0x01U;
+
+        if (status_out.OIP == 0U)
+        {
             return status_out;
         }
     }
+
+    /*
+     * Timeout: la NAND risulta ancora occupata.
+     * I chiamanti controlleranno status_out.OIP.
+     */
+    status_out.OIP = 1U;
+    return status_out;
 }
 
 
