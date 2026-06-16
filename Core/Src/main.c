@@ -516,84 +516,10 @@ MX_SPI3_Init();
   */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-<<<<<<< HEAD
     if (htim != &htim2)
     {
         return;
-=======
-	if(htim == &htim2){
-
-        /* --- Read IMU (always) --- */
-        IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
-        IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
-
-        /* --- Read light sensor (every LIGHT_SUBSAMPLE ticks = 10 Hz) --- */
-        light_tick++;
-        if (light_tick >= LIGHT_SUBSAMPLE) {
-            light_tick = 0;
-
-            /* Full spectrum: 12 channels (F1–F8, Clear, NIR) */
-            if (AS7341_ReadFullSpectrum(&spectrum)) {
-                /* Copy all 8 filter channels F1..F8 (indices 0..7 in spectrum) */
-                for (uint8_t i = 0; i < 8; i++) {
-                    uint16_t v = spectrum.ch[i];
-                    raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
-                    raw_light[2U * i + 1] = (uint8_t)(v >> 8);
-                }
-
-                /* Clear and NIR: use two of the remaining channels. Adjust
-                 * indices if you change SMUX mapping in as7341_driver.c. */
-                uint16_t clear = spectrum.ch[8];
-                uint16_t nir   = spectrum.ch[9];
-                raw_light[16] = (uint8_t)(clear & 0xFFU);
-                raw_light[17] = (uint8_t)(clear >> 8);
-                raw_light[18] = (uint8_t)(nir & 0xFFU);
-                raw_light[19] = (uint8_t)(nir >> 8);
-            }
-            
-            /* Flicker: use on-chip flicker engine to classify mains freq
-            * into {0, 50, 60} Hz equivalents. */
-            uint16_t mains_hz = AS7341_DetectMainsHz();
-            raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
-            raw_light[21] = (uint8_t)(mains_hz >> 8);
-            
-            /* Update MCU-side exposure metrics for this light sample,
-            * using flicker classification to split artificial vs natural
-            * and to gate circadian dose. */
-            LightMetrics_Update(&spectrum, &timestamp, mains_hz); //, mains_hz
-        }
-
-        /* --- BLE transmission (IMU only, unchanged for now) --- */
-        BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
-        BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
-
-        /* --- Timestamp @ 100 Hz --- */
-        timestamp.sss = tim * 10;
-		if(timestamp.sss == 1000) {
-			timestamp.ss++;
-			timestamp.sss = 0;
-			tim = 0;
-			if (timestamp.ss == 60){
-				timestamp.mm++;
-				timestamp.ss = 0;
-				if (timestamp.mm == 60){
-					timestamp.hh++;
-					timestamp.mm = 0;
-				}
-			}
-		}
-		tim++;
-    /*
-    if (NANDLogger_AppendSensorRecord(&nand_logger,
-    timestamp,
-    raw_accelerometer,
-    raw_gyroscope,
-    raw_light) != LOG_OK) {
-      HAL_TIM_Base_Stop_IT(&htim2);
-      current_state = STATE_IDLE;
->>>>>>> dface4cf84a25cc89c78a18d1f415275a81ae3d2
     }
-    */
 
     if (current_state != STATE_ACQUISITION)
     {
