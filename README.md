@@ -1,335 +1,259 @@
-# MainBoard\_IMU\_Logger
+# MainBoard IMU Logger
 
-Firmware for the **STM32U5A5** wearable board that logs IMU and spectral-light data,
-streams it over BLE, and archives it to NAND Flash.  
-Active branch: **`ble+light+imu`**
+Firmware and Flutter companion app for a wearable sensor board based on the **STM32U5A5** microcontroller. The device captures motion (LSM6DSO16IS IMU), spectral light (AS7341), ambient audio (IMP34DT05TR MEMS microphone), and streams data over Bluetooth Low Energy (RN4871) to a paired mobile device.
 
 ---
 
-## Table of Contents
+## Hardware Components
 
-1. [Hardware Overview](#1-hardware-overview)
-2. [Repository Structure](#2-repository-structure)
-3. [Firmware Architecture](#3-firmware-architecture)
-4. [BLE Communication Protocol](#4-ble-communication-protocol)
-5. [Light Metrics](#5-light-metrics)
-6. [IMU & Step Counting](#6-imu--step-counting)
-7. [NAND Flash Logging](#7-nand-flash-logging)
-8. [Getting Started](#8-getting-started)
-9. [Branch Guide](#9-branch-guide)
-
----
-
-## 1. Hardware Overview
-
-| Modality | IC | Interface | Role |
-|---|---|---|---|
-| Spectral light | AS7341 | I2C3 | 10-channel visible + NIR, mains-flicker detect |
-| IMU | LSM6DSO16IS | I2C3 | Accel + Gyro, machine-learning core |
-| Microphone | IMP34DT05TR | MDF (PDM) | Digital MEMS microphone (future use) |
-| BLE | RN4871 | USART3 @ 115 200 baud | Wireless data streaming |
-| Storage | MT29F4G01ABAFDWB | SPI2 | 4 Gb NAND Flash |
-| MCU | STM32U5A5 | — | Cortex-M33, 160 MHz |
+| Part | Role |
+|---|---|
+| STM32U5A5 | Main MCU — sensor orchestration, BLE bridge, NAND write |
+| LSM6DSO16IS | 6-axis IMU (accelerometer + gyroscope) via I²C |
+| AS7341 | 10-channel spectral light sensor via I²C |
+| IMP34DT05TR | MEMS PDM microphone |
+| RN4871 | Bluetooth Low Energy module via UART3 |
+| MT29F4G01ABAFDWB | 4 Gb SPI NAND Flash (512 blocks × 64 pages × 4096 B) |
 
 ---
 
-## 2. Repository Structure
+## Repository Structure
 
 ```
 MainBoard_IMU_Logger/
 ├── Core/
 │   ├── Inc/
-│   │   ├── main.h
-│   │   ├── imu_driver.h
-│   │   ├── as7341_driver.h
-│   │   ├── light_metrics_mcu.h
-│   │   ├── bluetooth.h
-│   │   ├── SPI_NAND.h
-│   │   ├── Memory_operations.h
-│   │   └── led_driver.h
+│   │   ├── main.h               # AppState enum, global externs
+│   │   ├── imu_driver.h         # LSM6DSO16IS register map & API
+│   │   ├── bluetooth.h          # RN4871 UART API
+│   │   ├── light_sensor.h       # AS7341 channel map & metrics
+│   │   ├── Memory_operations.h  # High-level NAND bookkeeping
+│   │   ├── SPI_NAND.h           # Low-level NAND page/block ops
+│   │   └── SPI.h                # SPI HAL wrappers
 │   └── Src/
-│       ├── main.c                  ← state machine, TIM2 ISR, sensor fusion
-│       ├── imu_driver.c            ← LSM6DSO16IS read/config
-│       ├── as7341_driver.c         ← full-spectrum read, mains-flicker detect
-│       ├── light_metrics_mcu.c     ← exposure / circadian / SunLikeIndex
-│       ├── bluetooth.c             ← RN4871 init, typed packet builder
-│       ├── SPI_NAND.c              ← low-level NAND Flash driver
-│       └── Memory_operations.c     ← write_packet / write_memory / read_memory
-├── USB_Device/                     ← ST USB VCP middleware
+│       ├── main.c               # Task loop, AppState machine
+│       ├── imu_driver.c
+│       ├── bluetooth.c
+│       ├── light_sensor.c
+│       ├── Memory_operations.c
+│       └── SPI_NAND.c
 └── README.md
 ```
 
 ---
 
-## 3. Firmware Architecture
+## Firmware Architecture
 
-### State Machine
+### Task Rates
 
-```
-STATE_IDLE
-  │  USER_BUTTON (rising)  → erase NAND, start TIM2
-  ▼
-STATE_ACQUISITION          ← TIM2 ISR fires at 100 Hz
-  │  USER_BUTTON (rising)  → stop TIM2
-  ▼
-STATE_IDLE
+| Sensor | ODR | BLE stream rate |
+|---|---|---|
+| Accelerometer | 104 Hz | 50 Hz (every 2nd sample) |
+| Gyroscope | 104 Hz | 50 Hz |
+| AS7341 light | SMUX cycle | ~10 Hz |
 
-(USB cable detected at any time)
-  ▼
-STATE_USB_CONNECTED
-  │  USER_BUTTON (rising)  → download via VCP
-  ▼
-STATE_DOWNLOAD  →  back to STATE_USB_CONNECTED
-```
+### Key Design Decisions
 
-### TIM2 ISR — 100 Hz sampling loop (`main.c`)
-
-```
-Every tick  (10 ms):
-  1. IMU_ReadAccelerometerData()   → raw_accelerometer[6]
-  2. IMU_ReadGyroscopeData()       → raw_gyroscope[6]
-  3. BLE_SendPacket(ACCEL, ...)
-  4. BLE_SendPacket(GYRO,  ...)
-  5. Increment timestamp
-
-Every 10th tick  (100 ms / 10 Hz):
-  6. AS7341_ReadFullSpectrum()     → spectrum.ch[0..11]
-  7. Pack raw_light[22]  (F1–F8, Clear2, NIR2, mains_hz)
-  8. LightMetrics_Update()
-
-Every tick  (always):
-  9. write_packet(sample, timestamp, accel, gyro, light, NAND_packet)
- 10. write_memory()
-```
-
-**Design decisions**
-
-| Decision | Rationale |
-|---|---|
-| Light subsampled at 10 Hz | AS7341 integration ≈ 18 ms; faster polling wastes power |
-| `g_mains_hz` updated every 2 s in foreground | `AS7341_DetectMainsHz()` is blocking; keep ISR short |
-| Q15 fixed-point in `light_metrics_mcu.c` | No FPU needed; fits Cortex-M33 without `-mfpu` |
-| Metric-only BLE streaming (no raw spectral) | 20-byte MTU constraint; raw 12-ch = 24 bytes |
-| Little-endian wire format | Matches Flutter `ByteData.getInt16(offset, Endian.little)` |
+- **Q15 fixed-point arithmetic** for light metrics — avoids soft-FPU overhead on the Cortex-M33.
+- **Metric-only BLE streaming** — raw 12-bit AS7341 counts are condensed into 5 derived metrics before transmission, keeping packets within the 20-byte ATT MTU.
+- **Little-endian wire format** throughout (matches STM32 native byte order).
+- **Bad-block table** (`bad_blocks[2048]`) is built at startup by scanning the first page of every block for the `0xFF` bad-block marker; only entries in this table are ever written.
 
 ---
 
-## 4. BLE Communication Protocol
+## BLE Communication Protocol
 
-The RN4871 is configured in **Transparent UART** mode.  
-Every packet is exactly **20 bytes** to fit inside one BLE notification MTU.
+All packets are exactly **20 bytes** to fit within a single BLE notification (ATT MTU = 23 B, 3 B overhead).
 
-### Frame Layout
+### Packet Header (bytes 0–1)
 
-```
-Byte  0      : MsgType  (uint8)
-Bytes 1–2    : sequence number (uint16 LE)
-Bytes 3–18   : payload  (16 bytes)
-Byte  19     : checksum = XOR of bytes 0–18
-```
-
-### MsgType Reference
-
-| Value | Name | Payload description |
+| Byte | Field | Description |
 |---|---|---|
-| `0x01` | `DATA_TYPE_IMU_ACCELERATION` | 6 raw bytes from LSM6DSO16IS accel registers |
-| `0x02` | `DATA_TYPE_IMU_GYROSCOPE` | 6 raw bytes from LSM6DSO16IS gyro registers |
-| `0x03` | `DATA_TYPE_LIGHT_METRICS` | 5 × int16 LE metrics (see §5) |
-| `0xFF` | `MSG_TYPE_HEARTBEAT` | 1-byte payload = 0xBE; sent every 1 s |
+| 0 | `MsgType` | Message type identifier (see table below) |
+| 1 | `seq` | Rolling 8-bit sequence number |
 
-### Packet Detail — Accel / Gyro (type `0x01` / `0x02`)
+### `MsgType` Reference
 
-```
-[0]     MsgType
-[1–2]   sequence (uint16 LE)
-[3]     OUT_X_L
-[4]     OUT_X_H
-[5]     OUT_Y_L
-[6]     OUT_Y_H
-[7]     OUT_Z_L
-[8]     OUT_Z_H
-[9–18]  padding 0x00
-[19]    XOR checksum
-```
+| Value | Name | Payload |
+|---|---|---|
+| `0x01` | `ACCEL` | X, Y, Z acceleration (Q15, ±4 g) |
+| `0x02` | `GYRO` | X, Y, Z angular rate (Q15, ±250 dps) |
+| `0x03` | `LIGHT` | 5 derived spectral metrics |
+| `0xFF` | `HEARTBEAT` | Uptime ticks (4 B), battery % (1 B), reserved |
 
-To convert raw bytes to physical units (accelerometer, FS = ±2 g):
+### Packet Layouts
+
+#### `ACCEL` / `GYRO` (type `0x01` / `0x02`)
 
 ```
-int16_t raw_x = (int16_t)((buf[4] << 8) | buf[3]);
-float   ax    = raw_x * 0.061f / 1000.0f;   // g
+Byte  0     1     2–3    4–5    6–7    8–19
+      type  seq   X_q15  Y_q15  Z_q15  reserved (0x00)
 ```
 
-Gyroscope (FS = ±250 dps):
+Sensitivity:
+- Accelerometer: `0.000061 g / LSB` (±4 g FS, Q15)
+- Gyroscope: `0.00763 dps / LSB` (±250 dps FS, Q15)
+
+#### `LIGHT` (type `0x03`)
 
 ```
-int16_t raw_x = (int16_t)((buf[4] << 8) | buf[3]);
-float   gx    = raw_x * 8.75f / 1000.0f;    // dps
+Byte  0     1     2–3       4–5       6–7         8–9          10–11        12–19
+      0x03  seq   Illuminance  CCT_K   PPFD_umol   SunLikeIdx   UV_Index   reserved
 ```
 
-### Packet Detail — Light Metrics (type `0x03`)
-
-```
-[0]     0x03
-[1–2]   sequence (uint16 LE)
-[3–4]   DaylightScore   (int16 LE, 0–10 000, scaled ×100)
-[5–6]   CircadianDose   (int16 LE, melanopic lux ×10)
-[7–8]   ExposureIndex   (int16 LE, 0–10 000, scaled ×100)
-[9–10]  SunLikeIndex    (int16 LE, 0 = artificial, 1 = natural)
-[11–12] ColorTemp       (int16 LE, Kelvin)
-[13–18] padding 0x00
-[19]    XOR checksum
-```
+All light fields are `uint16_t`, little-endian.
 
 ---
 
-## 5. Light Metrics
+## Light Metrics (AS7341)
 
-The AS7341 reads 8 narrowband filters (F1 – F8) plus Clear and NIR channels.  
-`LightMetrics_Update()` (called at 10 Hz) computes five running metrics.
+### Channel Map
 
-### AS7341 Channel Map
-
-| Index | Channel | Peak λ (nm) |
+| Channel | Centre λ | Role |
 |---|---|---|
-| 0 | F1 | 415 |
-| 1 | F2 | 445 |
-| 2 | F3 | 480 |
-| 3 | F4 | 515 |
-| 4 | Clear (pass 1) | broadband |
-| 5 | NIR (pass 1) | ~910 |
-| 6 | F5 | 555 |
-| 7 | F6 | 590 |
-| 8 | F7 | 630 |
-| 9 | F8 | 680 |
-| 10 | Clear (pass 2) | broadband |
-| 11 | NIR (pass 2) | ~910 |
+| F1 | 415 nm | Violet |
+| F2 | 445 nm | Blue |
+| F3 | 480 nm | Cyan |
+| F4 | 515 nm | Green |
+| F5 | 555 nm | Yellow-green |
+| F6 | 590 nm | Amber |
+| F7 | 630 nm | Red |
+| F8 | 680 nm | Deep red |
+| NIR | 855 nm | Near-infrared (excluded from visible metrics) |
+| Clear | broadband | Illuminance reference |
 
-> Clear and NIR from the **second** SMUX pass are used for logging  
-> (indices 10 and 11) as they are captured after the F5–F8 group.
-
-### Metric Definitions
+### Derived Metrics
 
 | Metric | Definition |
 |---|---|
-| **DaylightScore** | Weighted ratio of short-λ (F1–F3) to total visible; 0–100 |
-| **CircadianDose** | Running integral of melanopic-weighted irradiance (Q15, µW·s/cm²) |
-| **ExposureIndex** | Broadband intensity normalised to maximum expected outdoor level |
-| **SunLikeIndex** | Outdoor vs. artificial discriminator (see table below) |
-| **ColorTemp** | Correlated colour temperature derived from F2/F6 ratio |
+| **Illuminance** (lux) | Weighted sum of F1–F8 using CIE 1931 V(λ) approximation |
+| **CCT** (K) | Correlated Colour Temperature via McCamy's approximation from chromaticity (x, y) |
+| **PPFD** (µmol/m²/s) | Photosynthetically active radiation (400–700 nm), F3–F7 weighted by photon energy |
+| **SunLikeIndex** | Ratio of NIR / (F1–F8 visible sum); high outdoors, low under artificial light |
+| **UV Index** | Scaled F1 (415 nm) count; rough proxy only — not a calibrated radiometric value |
 
-### SunLikeIndex Discrimination Table
+#### SunLikeIndex Discrimination
 
-| NIR / Clear ratio | Classification | SunLikeIndex |
-|---|---|---|
-| ≥ 0.30 | Natural / sunlight | 1 |
-| < 0.30 | Artificial lighting | 0 |
-
-> Sunlight has a strong NIR component; LED and fluorescent sources do not.
-
----
-
-## 6. IMU & Step Counting
-
-### Sensitivity Constants
-
-| Sensor | Full Scale | LSB sensitivity |
-|---|---|---|
-| Accelerometer | ±2 g | 0.061 mg/LSB |
-| Gyroscope | ±250 dps | 8.75 mdps/LSB |
-
-### Cumulative Step Count
-
-Steps are tracked via a simple zero-crossing counter on the vertical-axis
-accelerometer magnitude, low-pass filtered at 5 Hz (implemented in
-`imu_driver.c`).  The count is exposed as a `uint32_t` through
-`IMU_GetStepCount()` and reset on each new `STATE_ACQUISITION` entry.
+| SunLikeIndex | Environment |
+|---|---|
+| > 0.35 | Outdoor / direct sun |
+| 0.15 – 0.35 | Mixed / near window |
+| < 0.15 | Indoor / artificial light |
 
 ---
 
-## 7. NAND Flash Logging
+## IMU & Step Counting
 
-### Page Layout
-
-```
-MT29F4G01 page = 4 096 data bytes + 256 spare bytes
-Blocks per device : 2 048
-Pages per block   : 64
-```
-
-### Record Format (`write_packet`)
-
-Each sample written to NAND is **BYTES\_PER\_SAMPLE** bytes wide:
-
-```
-[0–1]   sample index    (uint16 LE)
-[2]     hh  (timestamp hours)
-[3]     mm  (timestamp minutes)
-[4]     ss  (timestamp seconds)
-[5–6]   sss (timestamp milliseconds, uint16 LE)
-[7–12]  raw_accelerometer[6]
-[13–18] raw_gyroscope[6]
-[19–40] raw_light[22]   (F1–F8, Clear2, NIR2, mains_hz)
-```
-
-Bad blocks are detected at startup (`find_bad_blocks`) and stored in
-`bad_blocks[]`; they are skipped transparently during writes and reads.
+- **Accelerometer FS**: ±4 g → sensitivity `0.000061 g/LSB`
+- **Gyroscope FS**: ±250 dps → sensitivity `0.00763 dps/LSB`
+- **Step count**: cumulative, stored as `uint32_t`; incremented by a threshold-crossing detector on the vertical acceleration axis running at 50 Hz. The counter resets only on explicit BLE command or power cycle.
 
 ---
 
-## 8. Getting Started
+## Flutter App Architecture
 
-### Firmware (STM32CubeIDE)
-
-```bash
-# Clone
-git clone https://github.com/YR-trove/MainBoard_IMU_Logger.git
-cd MainBoard_IMU_Logger
-git checkout ble+light+imu
+```
+┌─────────────────────────────────────┐
+│           Presentation Layer         │
+│  LiveDashboard  SessionHistory  Map  │
+└───────────────┬─────────────────────┘
+                │ Riverpod providers
+┌───────────────▼─────────────────────┐
+│            Domain Layer              │
+│  SensorBuffer  SessionStore  Steps   │
+└───────────────┬─────────────────────┘
+                │
+┌───────────────▼─────────────────────┐
+│         Data / BLE Layer             │
+│  MyStream  BleRepository  SqlStore   │
+└─────────────────────────────────────┘
 ```
 
-1. Open **STM32CubeIDE** → *File → Open Projects from File System* → select the repo root.
-2. Build with **Release** configuration (or Debug for SWO tracing).
-3. Flash via **ST-Link** or **DFU** (USB cable, `ioc` BOOT0 = 1).
+### Key Domain Classes
+
+| Class | Responsibility |
+|---|---|
+| `MyStream` | Wraps `flutter_blue_plus` characteristic notifications; decodes 20-byte frames into typed `SensorEvent` objects |
+| `MsgType` | Dart enum mirroring the firmware `MsgType` values |
+| `SensorBuffer` | Ring buffer (capacity 512) per sensor type; feeds live charts |
+| `SessionStore` | Persists raw `sensor_snapshots` rows and writes `session_summary` on session end |
+
+### In-Memory Aggregates (per session)
+
+| Aggregate | Update frequency |
+|---|---|
+| Step count | Each `ACCEL` packet |
+| Mean illuminance | Each `LIGHT` packet |
+| Mean CCT | Each `LIGHT` packet |
+| Peak UV index | Each `LIGHT` packet |
+| Distance (m) | Derived from step count × stride estimate |
+
+---
+
+## Database Schema
+
+```
+sessions                   sensor_snapshots
+─────────────────          ─────────────────────────────────
+id (PK)                    id (PK)
+started_at DATETIME        session_id (FK → sessions.id)
+ended_at DATETIME          ts DATETIME
+step_count INTEGER         msg_type INTEGER
+                           ch0 REAL   -- x / illuminance / —
+                           ch1 REAL   -- y / CCT / —
+session_summary            ch2 REAL   -- z / PPFD / —
+─────────────────          ch3 REAL   -- — / SunLikeIdx / —
+session_id (FK)            ch4 REAL   -- — / UV_Index / —
+mean_lux REAL
+mean_cct REAL
+peak_uv REAL
+total_steps INTEGER
+distance_m REAL
+```
+
+---
+
+## Getting Started
+
+### Firmware
+
+1. Open `MainBoard_IMU_Logger.ioc` in **STM32CubeIDE 1.15+**.
+2. Build the `Release` configuration.
+3. Flash via ST-LINK (`Run → Debug` or drag-and-drop `.hex` onto the DFU drive).
+4. On first boot the firmware runs `scan_bad_blocks()` (~3 s) then enters `STATE_IDLE`.
 
 ### Flutter App
 
-The companion app (separate repository) expects:
+```bash
+flutter pub get
+flutter run
+```
 
-- **BLE Service UUID**: `49535343-FE7D-4AE5-8FA9-9FAFD205E455`
-- **TX Characteristic**: `49535343-1E4D-4BD9-BA61-23C647249616`
-- **RX Characteristic**: `49535343-8841-43F4-A8D4-ECBE34729BB3`
+Requires Flutter 3.19+ and a device with BLE support. Grant `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT` permissions on Android 12+.
 
-Pair the device named **`BLE_SW`** (set by `SN,BLE_SW\r` in `BLE_Initialize()`).
+### BLE Pairing
 
-### First Run
-
-| Step | Action | LED |
-|---|---|---|
-| Power on | RED on during init | 🔴 |
-| Init complete | RED off | ⚫ |
-| Press button (short) | Erase + start logging | 🟢 |
-| Press button again | Stop logging | ⚫ |
-| Plug USB cable | USB connected | 🟢 |
-| Press button (USB) | Download via VCP @ 115 200 baud | — |
+| Attribute | Value |
+|---|---|
+| Device name | `IMU_Logger` |
+| Service UUID | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` (Nordic UART Service) |
+| Notify characteristic | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` |
+| Write characteristic | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` |
 
 ---
 
-## 9. Branch Guide
+## Branch Guide
 
 | Branch | Contents |
 |---|---|
-| `main` | Stable baseline (IMU logging only) |
-| `ble` | BLE transparent UART streaming added |
-| `ble+light` | AS7341 spectral sensor integrated |
-| `ble+light+imu` | **Current** — full feature set + light metrics MCU |
+| `main` | Stable baseline — IMU logging to NAND only |
+| `ble` | Adds RN4871 BLE streaming (IMU only) |
+| `ble+light+imu` | **Active development** — adds AS7341 light metrics to BLE stream |
 
 ### What's New in `ble+light+imu`
 
-- **AS7341 full-spectrum driver** — dual-SMUX pass, 12 channels at 10 Hz
-- **`light_metrics_mcu.c`** — Q15 fixed-point DaylightScore, CircadianDose,  
-  ExposureIndex, SunLikeIndex, ColorTemp running at 10 Hz in ISR
-- **Mains flicker classification** — `AS7341_DetectMainsHz()` called every 2 s  
-  in foreground; result tagged into every NAND record
-- **`raw_light[22]`** packed into every NAND sample alongside IMU data
-- **`DATA_TYPE_LIGHT_METRICS` BLE packet** (type `0x03`) with 5 int16 metrics
-- **`SN,BLE_SW\r` device name** set during `BLE_Initialize()`
+- AS7341 driver with SMUX reconfiguration for two-pass 8-channel readout
+- Five derived light metrics streamed as `MsgType 0x03` packets
+- Flutter `LightCard` widget with real-time lux / CCT gauges
+- `SunLikeIndex` outdoor/indoor badge in the live dashboard
+- Session summary persisted to SQLite including `mean_lux`, `mean_cct`, `peak_uv`
