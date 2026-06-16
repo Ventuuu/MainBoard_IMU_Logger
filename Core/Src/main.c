@@ -413,8 +413,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
                                   raw_light) != LOG_OK) {
       HAL_TIM_Base_Stop_IT(&htim2);
       current_state = STATE_IDLE;
-      LED_Off(LED_GREEN);
-      LED_On(LED_RED);
     }
 
   }
