@@ -271,42 +271,49 @@ MX_SPI3_Init();
         {
           current_state = STATE_USB_CONNECTED;
           LED_On(LED_GREEN);
-        }     
-        break;
-        
+          }     
+          break;
+
         case STATE_ACQUISITION:
-        
-        if (audio_buffer_ready)
-        {
-          audio_buffer_ready = 0U;
-          
-          if (NANDLogger_AppendAudioBuffer(&nand_logger,
-          audio_buffer,
-          AUDIO_BUFFER_SIZE,
-          Time_ToMilliseconds(timestamp)) != LOG_OK) 
+
+          if (audio_buffer_ready && current_state == STATE_ACQUISITION)
           {
+            audio_buffer_ready = 0U;
 
-            Error_Handler();
-          }
+            if (NANDLogger_AppendAudioBuffer(&nand_logger,
+                                         audio_buffer,
+                                         AUDIO_BUFFER_SIZE,
+                                         Time_ToMilliseconds(timestamp)) != LOG_OK)
+            {
+              HAL_TIM_Base_Stop_IT(&htim2);
 
-            /*
-            * Se vuoi acquisizione continua, NON tornare subito a STATE_IDLE.
-            */
+              if (microphone_active)
+              {
+                HAL_MDF_AcqStop_DMA(&MdfHandle0);
+                microphone_active = 0U;
+              }
+
+              audio_buffer_ready = 0U;
+
+              current_state = STATE_IDLE;
+
+              LED_Off(LED_GREEN);
+              LED_On(LED_RED);
+            }
           }
-          else if (!microphone_active)
+          else if (!microphone_active && current_state == STATE_ACQUISITION)
           {
             if (HAL_MDF_AcqStart_DMA(&MdfHandle0,
-              &MdfFilterConfig0,
-              &mic_dma_config) != HAL_OK)
-              {
-                Error_Handler();
-              }
-              
-              microphone_active = 1U;
+                                 &MdfFilterConfig0,
+                                 &mic_dma_config) != HAL_OK)
+            {
+              Error_Handler();
             }
-            
-            
-          break;
+
+            microphone_active = 1U;
+          }
+
+    break;
 
 	  	  case STATE_USB_CONNECTED:
 	  		 break;
@@ -428,10 +435,20 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 				LED_On(LED_GREEN);
 			  break;
 			case STATE_ACQUISITION:
-				current_state = STATE_IDLE;
-				HAL_TIM_Base_Stop_IT(&htim2);
-				LED_Off(LED_GREEN);
-			  break;
+        HAL_TIM_Base_Stop_IT(&htim2);
+
+        if (microphone_active)
+        {
+        HAL_MDF_AcqStop_DMA(&MdfHandle0);
+        microphone_active = 0U;
+        }
+
+        audio_buffer_ready = 0U;
+
+        current_state = STATE_IDLE;
+
+        LED_Off(LED_GREEN);
+       break;
 			case STATE_USB_CONNECTED:
 				exit_flag = 0;
 				current_state = STATE_DOWNLOAD;
