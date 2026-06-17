@@ -12,12 +12,14 @@
  *
  * Metrics (instantaneous = last completed 1-second window)
  * ---------------------------------------------------------
- *   BlueIndex                = F3  (480 nm only, saturated to 16 bits)
- *   BlueFrac  (Q15)          = F3 / sum(F1..F8)          [0..32767]
- *   SunLikeIndex (Q15)       = (F7+F8) / sum(F1..F8)     [0..32767]
- *                              High → red-rich sunlight; Low → artificial
- *   UV_risk                  = (F1+F2+F3)^2 / sum(F1..F8)  (raw, no CLEAR)
- *   BlueWeightedIlluminance  = F3^2 / sum(F1..F8)           (raw, no CLEAR)
+ *   BlueIndex          = F3  (480 nm only, saturated to 16 bits)
+ *   BlueFrac  (Q15)    = F3 / sum(F1..F8)              [0..32767]
+ *   SunLikeIndex (Q15) = (F7+F8) / sum(F1..F8)         [0..32767]
+ *   UV_risk  (Q15)     = (F1+F2+F3) / sum(F1..F8)      [0..32767]
+ *   BlueWeightedIll (Q15) = (F3+F4) / sum(F1..F8)      [0..32767]
+ *
+ * All Q15 values: 32767 = 100 %, 0 = 0 %.
+ * Intermediate multiplications use uint64_t to prevent overflow.
  *
  * Cumulative accumulators (rectangle rule, 1 Hz update)
  * ------------------------------------------------------
@@ -25,7 +27,7 @@
  *   BlueExposure_accum
  *   BlueExposureArtificial_accum
  *   BlueExposureNatural_accum
- *   CircadianDose_accum          (artificial light, 20:00–24:00 only)
+ *   CircadianDose_accum          (artificial light, 20:00-24:00 only)
  */
 
 #ifndef INC_LIGHT_METRICS_MCU_H_
@@ -65,31 +67,34 @@ uint8_t LightMetrics_Update(const AS7341_Spectrum *spectrum,
 /** BlueIndex = F3 (480 nm), averaged over window, saturated to 16 bits. */
 uint16_t LightMetrics_GetBlueIndex(void);
 
-/** BlueFrac Q15: F3 / sum(F1..F8), averaged spectrum. */
+/** BlueFrac Q15: F3 / sum(F1..F8). */
 uint16_t LightMetrics_GetBlueFracQ15(void);
 
 /**
- * SunLikeIndex Q15: (F7+F8) / sum(F1..F8), averaged spectrum.
+ * SunLikeIndex Q15: (F7+F8) / sum(F1..F8).
  *
- * High value → red-rich, sun-like spectrum.
- * Low value  → artificial (cool-white LED/fluorescent).
+ * High value -> red-rich, sun-like spectrum.
+ * Low value  -> artificial (cool-white LED/fluorescent).
  *
  * Indicative ranges (calibrate with field data):
- *   Outdoor sunlight  : ~6000–12000
- *   Indoor cool-white : ~800–2500
- *   Indoor warm-white : ~2500–5000
+ *   Outdoor sunlight  : ~6000-12000
+ *   Indoor cool-white : ~800-2500
+ *   Indoor warm-white : ~2500-5000
  */
 uint16_t LightMetrics_GetSunLikeIndexQ15(void);
 
 /**
- * UV_risk proxy: (F1+F2+F3)^2 / sum(F1..F8).
- * Pure spectral product — no CLEAR channel involvement.
+ * UV_risk Q15: (F1+F2+F3) / sum(F1..F8).
+ * Fraction of total spectral power in the violet/blue-UV bands.
+ * 32767 = all energy in F1-F3; 0 = none.
  */
 uint32_t LightMetrics_GetUvRisk(void);
 
 /**
- * Blue-weighted illuminance: F3^2 / sum(F1..F8).
- * Pure spectral product — no CLEAR channel involvement.
+ * BlueWeightedIlluminance Q15: (F3+F4) / sum(F1..F8).
+ * Fraction of total spectral power in the blue+cyan bands (480+515 nm).
+ * Complements BlueFrac (F3 only) by including the cyan channel.
+ * 32767 = all energy in F3+F4; 0 = none.
  */
 uint32_t LightMetrics_GetBlueWeightedIlluminance(void);
 
@@ -101,7 +106,7 @@ uint64_t LightMetrics_GetBlueExposureArtificialAccum(void);
 uint64_t LightMetrics_GetBlueExposureNaturalAccum(void);
 uint64_t LightMetrics_GetCircadianDoseAccum(void);
 
-/** Reset all state — call once at session start. */
+/** Reset all state - call once at session start. */
 void LightMetrics_Reset(void);
 
 #ifdef __cplusplus
