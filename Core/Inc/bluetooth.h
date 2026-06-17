@@ -12,8 +12,9 @@
  * MsgType bytes match the Flutter app's MsgType enum exactly:
  *   0x41 ('A') imuAccel  — ax, ay, az (Int16-LE) + stepCount (UInt16-LE)
  *   0x47 ('G') imuGyro   — gx, gy, gz (Int16-LE)
- *   0x4C ('L') light     — uvRisk, blueLightIntensity, blueLightRatio,
- *                           sunLikeIndex, metric1 (all UInt16-LE)
+ *   0x4C ('L') light     — five Q15 spectral metrics (all UInt16-LE):
+ *                           uvRisk, blueIndex, blueFrac,
+ *                           sunLikeIndex, blueCyanFrac
  */
 
 #ifndef INC_BLUETOOTH_H_
@@ -63,24 +64,45 @@ typedef struct {
 } BLE_ImuGyroPayload;
 
 /**
- * Payload for DATA_TYPE_LIGHT.
- * All fields are unsigned 16-bit; the app stores them as REAL in the
- * sensor_snapshots table columns f1..f5:
+ * Payload for DATA_TYPE_LIGHT  (MsgType 0x4C 'L').
  *
- *   f1 = uv_risk              — UV proxy (F1+F2+F3)/sum * CLEAR, 16-bit
- *   f2 = blue_light_intensity — BlueIndex = F3+F4 (16-bit)
- *   f3 = blue_light_ratio     — BlueFrac Q15 (0..32767 maps to 0.0..1.0)
- *   f4 = sun_like_index       — RedFrac Q15  (0..32767 maps to 0.0..1.0)
- *                               High value → sun-like spectrum (outdoor)
- *                               Low value  → blue-dominant artificial light
- *   f5 = metric1              — CLEAR channel raw count (brightness proxy)
+ * All fields are UInt16-LE on the wire.
+ * Q15 fields: 0 = 0%, 32767 = 100% of sum(F1..F8).
+ * The app stores them as REAL in sensor_snapshots columns f1..f5.
+ *
+ * Wire layout:
+ *   Bytes [2-3]  uv_risk              f1 — UV-proxy Q15
+ *                                         = (F1+F2+F3) / sum(F1..F8)
+ *                                         Fraction of total power in the
+ *                                         violet/blue-UV bands (415-480 nm).
+ *
+ *   Bytes [4-5]  blue_light_intensity f2 — BlueIndex (raw count)
+ *                                         = avg F3 (480 nm), saturated to
+ *                                         uint16.  Absolute blue intensity,
+ *                                         not a ratio.
+ *
+ *   Bytes [6-7]  blue_light_ratio     f3 — BlueFrac Q15
+ *                                         = F3 / sum(F1..F8)
+ *                                         Fraction of total power at 480 nm.
+ *
+ *   Bytes [8-9]  sun_like_index       f4 — SunLikeIndex Q15
+ *                                         = (F7+F8) / sum(F1..F8)
+ *                                         High -> red-rich sunlight.
+ *                                         Low  -> artificial/cool-white.
+ *
+ *   Bytes [10-11] metric1_clear       f5 — BlueCyanFrac Q15
+ *                                         = (F3+F4) / sum(F1..F8)
+ *                                         Fraction of total power in the
+ *                                         blue+cyan bands (480+515 nm).
+ *                                         Broader than BlueFrac; includes
+ *                                         the cyan channel.
  */
 typedef struct {
-    uint16_t uv_risk;
-    uint16_t blue_light_intensity;
-    uint16_t blue_light_ratio;
-    uint16_t sun_like_index;
-    uint16_t metric1_clear;
+    uint16_t uv_risk;               /* UV-proxy Q15:       (F1+F2+F3)/sum */
+    uint16_t blue_light_intensity;  /* BlueIndex raw:       avg F3 count   */
+    uint16_t blue_light_ratio;      /* BlueFrac Q15:        F3/sum         */
+    uint16_t sun_like_index;        /* SunLikeIndex Q15:   (F7+F8)/sum     */
+    uint16_t metric1_clear;         /* BlueCyanFrac Q15:   (F3+F4)/sum     */
 } BLE_LightPayload;
 
 /* --- Function Prototypes ------------------------------------------------- */
