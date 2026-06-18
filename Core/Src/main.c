@@ -28,10 +28,11 @@
   *
   *  Drain path  (runs every iteration, independent of fetch)
   *    5. IMU_RingBuffer_Pop → convert raw bytes → IMU_Data floats.
-  *    6. Light sensor read every LIGHT_SUBSAMPLE ticks (10 Hz).
-  *    7. BLE_SendUnifiedPacket (sent once per 1-second light window).
-  *    8. write_packet + write_memory  (NAND Flash).
-  *    9. Mains flicker update every 2 s.
+  *    6. ImuMetrics_Update  → step count, cadence, activity state.
+  *    7. Light sensor read every LIGHT_SUBSAMPLE ticks (10 Hz).
+  *    8. BLE_SendUnifiedPacket (sent once per 1-second light window).
+  *    9. write_packet + write_memory  (NAND Flash).
+  *   10. Mains flicker update every 2 s.
   *
   * NVIC priority table
   * ---------------------------------------------------------------------------
@@ -56,6 +57,7 @@
 #include "led_driver.h"
 #include "imu_driver.h"
 #include "imu_ring_buffer.h"
+#include "imu_metrics.h"
 #include "bluetooth.h"
 #include "as7341_driver.h"
 #include "light_metrics_mcu.h"
@@ -216,6 +218,7 @@ int main(void)
   }
 
   LightMetrics_Reset();
+  ImuMetrics_Reset();
   IMU_RingBuffer_Init(&g_imu_ring_buffer);
 
   /*
@@ -293,6 +296,11 @@ int main(void)
             IMU_ReadGyroscopeData    (&gyroscope_data,     raw_gyroscope);
 
             /* ----------------------------------------------------------
+             * IMU metrics — step count, cadence, activity state (100 Hz)
+             * ---------------------------------------------------------- */
+            ImuMetrics_Update(&accelerometer_data, &gyroscope_data);
+
+            /* ----------------------------------------------------------
              * Light sensor — triggered every LIGHT_SUBSAMPLE ticks (10 Hz)
              * ---------------------------------------------------------- */
             uint8_t cur_tick = g_light_tick;
@@ -331,22 +339,22 @@ int main(void)
                  * (every LIGHT_METRICS_WINDOW = 10 calls at 10 Hz).
                  * Only send the unified BLE packet when metrics are fresh.
                  *
-                 * BLE_UnifiedPayload fields:
-                 *   stepCount          — stubbed 0 (no step driver yet)
-                 *   cadence            — stubbed 0
-                 *   activityState      — stubbed ACTIVITY_IDLE
-                 *   uvRisk             — LightMetrics_GetUvRisk()          (Q15)
-                 *   blueLightIntensity — LightMetrics_GetBlueIndex()
-                 *   blueLightRatio     — LightMetrics_GetBlueFracQ15()     (Q15)
-                 *   sunLikeIndex       — LightMetrics_GetSunLikeIndexQ15() (Q15)
-                 *   metric1_clear      — spectrum.ch[10] (Clear, 2nd SMUX)
+                 * BLE_UnifiedPayload field sources:
+                 *   stepCount     <- ImuMetrics_GetStepCount()    (uint32 → uint16)
+                 *   cadence       <- ImuMetrics_GetCadence()      (uint16 → uint8)
+                 *   activityState <- ImuMetrics_GetActivityState() (enum cast)
+                 *   uvRisk        <- LightMetrics_GetUvRisk()       (Q15)
+                 *   blueLightIntensity <- LightMetrics_GetBlueIndex()
+                 *   blueLightRatio     <- LightMetrics_GetBlueFracQ15()      (Q15)
+                 *   sunLikeIndex       <- LightMetrics_GetSunLikeIndexQ15()  (Q15)
+                 *   metric1_clear      <- spectrum.ch[10]  (Clear, 2nd SMUX)
                  */
                 if (LightMetrics_Update(&spectrum, &timestamp, g_mains_hz))
                 {
                     BLE_UnifiedPayload ble_payload;
-                    ble_payload.stepCount           = 0U;
-                    ble_payload.cadence             = 0U;
-                    ble_payload.activityState       = ACTIVITY_IDLE;
+                    ble_payload.stepCount           = (uint16_t)ImuMetrics_GetStepCount();
+                    ble_payload.cadence             = (uint8_t)ImuMetrics_GetCadence();
+                    ble_payload.activityState       = (BLE_ActivityState)ImuMetrics_GetActivityState();
                     ble_payload.uvRisk              = (uint16_t)LightMetrics_GetUvRisk();
                     ble_payload.blueLightIntensity  = LightMetrics_GetBlueIndex();
                     ble_payload.blueLightRatio      = LightMetrics_GetBlueFracQ15();
