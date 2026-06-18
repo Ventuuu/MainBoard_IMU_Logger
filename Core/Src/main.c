@@ -29,7 +29,7 @@
   *  Drain path  (runs every iteration, independent of fetch)
   *    5. IMU_RingBuffer_Pop → convert raw bytes → IMU_Data floats.
   *    6. Light sensor read every LIGHT_SUBSAMPLE ticks (10 Hz).
-  *    7. BLE_SendImuAccelPacket / BLE_SendImuGyroPacket.
+  *    7. BLE_SendUnifiedPacket (sent once per 1-second light window).
   *    8. write_packet + write_memory  (NAND Flash).
   *    9. Mains flicker update every 2 s.
   *
@@ -327,18 +327,34 @@ int main(void)
                 raw_light[21] = (uint8_t)(g_mains_hz >> 8);
 
                 /*
-                 * LightMetrics_Update(const AS7341_Spectrum *spectrum,
-                 *                     const Time_Struct     *timestamp,
-                 *                     uint16_t               mains_hz)
+                 * LightMetrics_Update returns 1 once per 1-second window
+                 * (every LIGHT_METRICS_WINDOW = 10 calls at 10 Hz).
+                 * Only send the unified BLE packet when metrics are fresh.
+                 *
+                 * BLE_UnifiedPayload fields:
+                 *   stepCount          — stubbed 0 (no step driver yet)
+                 *   cadence            — stubbed 0
+                 *   activityState      — stubbed ACTIVITY_IDLE
+                 *   uvRisk             — LightMetrics_GetUvRisk()          (Q15)
+                 *   blueLightIntensity — LightMetrics_GetBlueIndex()
+                 *   blueLightRatio     — LightMetrics_GetBlueFracQ15()     (Q15)
+                 *   sunLikeIndex       — LightMetrics_GetSunLikeIndexQ15() (Q15)
+                 *   metric1_clear      — spectrum.ch[10] (Clear, 2nd SMUX)
                  */
-                LightMetrics_Update(&spectrum, &timestamp, g_mains_hz);
+                if (LightMetrics_Update(&spectrum, &timestamp, g_mains_hz))
+                {
+                    BLE_UnifiedPayload ble_payload;
+                    ble_payload.stepCount           = 0U;
+                    ble_payload.cadence             = 0U;
+                    ble_payload.activityState       = ACTIVITY_IDLE;
+                    ble_payload.uvRisk              = (uint16_t)LightMetrics_GetUvRisk();
+                    ble_payload.blueLightIntensity  = LightMetrics_GetBlueIndex();
+                    ble_payload.blueLightRatio      = LightMetrics_GetBlueFracQ15();
+                    ble_payload.sunLikeIndex        = LightMetrics_GetSunLikeIndexQ15();
+                    ble_payload.metric1_clear       = spectrum.ch[10];
+                    BLE_SendUnifiedPacket(&ble_payload);
+                }
             }
-
-            /* ----------------------------------------------------------
-             * BLE transmission
-             * ---------------------------------------------------------- */
-            BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
-            BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE,    raw_gyroscope);
 
             /* ----------------------------------------------------------
              * NAND Flash write
