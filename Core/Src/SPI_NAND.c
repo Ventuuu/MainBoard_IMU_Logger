@@ -394,7 +394,7 @@ int read_from_cache(column_address_t column, uint8_t *data_out, size_t read_len,
                            uint32_t timeout)
 {
 	/** \brief Read from cache operation
-	 * The READ FROM CACHE ×1 command facilitates the sequential reading of
+	 * The READ FROM CACHE x1 command facilitates the sequential reading of
 	 * one or more data bytes from the cache buffer. Initiating the command
 	 * involves driving CS# LOW, shifting in the command opcode 03h/0Bh,
 	 * followed by a 16-bit column address and 8 dummy clocks.
@@ -709,7 +709,7 @@ int spi_read(uint8_t *read_buff, size_t read_len, uint32_t timeout_ms)
     return SPI_NAND_RET_OK;
 }
 
-int spi_write(uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
+int spi_write(const uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
 {
 	int r = HAL_SPI_Transmit(&hspi2, write_buff, write_len, timeout_ms);
     return r;
@@ -784,4 +784,3 @@ void erase_memory()
 {
 	erase_bad_blocks(bad_blocks2); // Erase bad_blocks (set all memory to 0xFF)
 }
-
