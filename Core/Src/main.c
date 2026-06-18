@@ -7,16 +7,16 @@
   * @details
   *
   * Interrupt / main-loop split
-  * ────────────────────────────────────────────────────────────────────────────
+  * ---------------------------------------------------------------------------
   *
   *  TIM2 ISR  (100 Hz, NVIC priority 6)            duration < 1 µs
-  *  ──────────────────────────────────────────────────────────────
+  *  -----------------------------------------------------------------------
   *  • Sets  g_imu_fetch_flag = 1
   *  • Increments g_light_tick
   *  • Returns immediately — NO I2C, NO math, NO memory writes.
   *
   *  STATE_ACQUISITION in while(1)                  thread context
-  *  ──────────────────────────────────────────────────────────────
+  *  -----------------------------------------------------------------------
   *  Fetch path  (triggered by g_imu_fetch_flag)
   *    1. Clear flag inside __disable_irq critical section.
   *    2. HAL_I2C_Master_Transmit / Receive for accelerometer  ← blocking,
@@ -34,7 +34,7 @@
   *    9. Mains flicker update every 2 s.
   *
   * NVIC priority table
-  * ────────────────────────────────────────────────────────────────────────────
+  * ---------------------------------------------------------------------------
   *  Priority 5  USART3_IRQn   — RN4871 BLE UART
   *  Priority 5  OTG_FS_IRQn   — USB VCP
   *  Priority 6  TIM2_IRQn     — 100 Hz tripwire (flag only)
@@ -98,15 +98,12 @@ uint8_t raw_accelerometer[6] = {0};
 uint8_t raw_gyroscope[6]     = {0};
 
 /* --- Light sensor --------------------------------------------------------- */
-static AS7341_Data     light_data;
 static AS7341_Spectrum spectrum;
 uint8_t raw_light[22] = {0};
 
 /*
- * g_light_tick     — incremented in the ISR (volatile, 8-bit wraps freely).
+ * g_light_tick      — incremented in the ISR (volatile, 8-bit wraps freely).
  * g_light_tick_last — last value consumed by main loop (non-volatile copy).
- * A read comparison of the two tells the main loop whether LIGHT_SUBSAMPLE
- * new IMU ticks have elapsed since the last AS7341 read.
  */
 static volatile uint8_t g_light_tick      = 0U;
 static          uint8_t g_light_tick_last = 0U;
@@ -166,15 +163,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (htim != &htim2) return;
     if (current_state != STATE_ACQUISITION) return;
 
-    /*
-     * Signal the main loop that 10 ms have elapsed and a fresh IMU
-     * sample is waiting on the sensor.  The main loop will clear this
-     * flag and perform the I2C read in thread context, where the NVIC
-     * can freely preempt with higher-priority interrupts.
-     */
     g_imu_fetch_flag = 1U;
-
-    /* Advance subsample counter for the 10 Hz light sensor trigger. */
     g_light_tick++;
 }
 /* USER CODE END 0 */
@@ -231,13 +220,8 @@ int main(void)
 
   /*
    * Set NVIC priorities BEFORE starting the timer.
-   *
-   * BLE (USART3) and USB (OTG_FS) are set to priority 5 so they
-   * can preempt TIM2 (priority 6) and, crucially, can also preempt
-   * the main loop's blocking I2C calls (thread priority ~15).
-   *
-   * TIM2 is the lowest-priority IRQ in this system: it does nothing
-   * but set a flag, so even a brief delay in servicing it is harmless.
+   * BLE (USART3) and USB (OTG_FS) at priority 5 so they preempt TIM2
+   * and the main loop's blocking I2C calls (thread priority ~15).
    */
   HAL_NVIC_SetPriority(USART3_IRQn,  5, 0);
   HAL_NVIC_SetPriority(OTG_FS_IRQn,  5, 0);
@@ -248,7 +232,6 @@ int main(void)
   HAL_NVIC_SetPriority(EXTI10_IRQn,  6, 0);
   HAL_NVIC_SetPriority(EXTI13_IRQn,  6, 0);
 
-  /* Start the 100 Hz acquisition timer — ISR begins firing now. */
   HAL_TIM_Base_Start_IT(&htim2);
 
   LED_Off(LED_RED);
@@ -277,15 +260,10 @@ int main(void)
       case STATE_ACQUISITION:
       {
         /* ==============================================================
-         * FETCH PATH
-         * Check the tripwire flag set by the TIM2 ISR.
-         * The I2C reads happen here, in thread context, so any
-         * higher-priority IRQ (BLE, USB) can preempt them freely.
+         * FETCH PATH — read IMU in thread context (NVIC-preemptible)
          * ============================================================== */
         uint8_t do_fetch;
 
-        /* Read-clear the flag atomically to avoid a race where the ISR
-         * fires between the test and the clear. */
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
         do_fetch         = g_imu_fetch_flag;
@@ -294,20 +272,9 @@ int main(void)
 
         if (do_fetch)
         {
-            /*
-             * Blocking I2C reads — safe here because:
-             * 1. We are in thread context (not inside any ISR).
-             * 2. The NVIC is fully active: USART3 (BLE, prio 5) and
-             *    OTG_FS (USB, prio 5) will preempt these calls if a
-             *    radio or host event arrives mid-transfer.
-             * 3. TIM2 (prio 6) will also preempt and set the NEXT
-             *    fetch flag while we are still reading this sample,
-             *    guaranteeing no tick is ever silently missed.
-             */
             IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
             IMU_ReadGyroscopeData    (&gyroscope_data,     raw_gyroscope);
 
-            /* Pack raw bytes into the ring buffer entry and push. */
             IMU_RawData_t raw_sample;
             memcpy(raw_sample.acc,  raw_accelerometer, 6);
             memcpy(raw_sample.gyro, raw_gyroscope,     6);
@@ -315,24 +282,18 @@ int main(void)
         }
 
         /* ==============================================================
-         * DRAIN PATH
-         * Process one buffered sample per loop iteration.
+         * DRAIN PATH — one buffered sample per loop iteration
          * ============================================================== */
         IMU_RawData_t popped;
         if (IMU_RingBuffer_Pop(&g_imu_ring_buffer, &popped))
         {
-            /* Raw bytes are already in accelerometer_data / gyroscope_data
-             * from the most recent fetch; the ring buffer carries the
-             * raw bytes for any catch-up samples that accumulated while
-             * the loop was busy.  Re-convert from popped bytes so every
-             * entry sent over BLE / written to NAND is self-consistent. */
             memcpy(raw_accelerometer, popped.acc,  6);
             memcpy(raw_gyroscope,     popped.gyro, 6);
             IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
             IMU_ReadGyroscopeData    (&gyroscope_data,     raw_gyroscope);
 
             /* ----------------------------------------------------------
-             * Light sensor — triggered every LIGHT_SUBSAMPLE ticks.
+             * Light sensor — triggered every LIGHT_SUBSAMPLE ticks (10 Hz)
              * ---------------------------------------------------------- */
             uint8_t cur_tick = g_light_tick;
             if ((uint8_t)(cur_tick - g_light_tick_last) >= LIGHT_SUBSAMPLE)
@@ -341,19 +302,36 @@ int main(void)
 
                 AS7341_ReadFullSpectrum(&spectrum);
 
-                for (uint8_t ch = 0; ch < 8; ch++) {
-                    raw_light[ch * 2]     = (uint8_t)(spectrum.channel[ch] & 0xFF);
-                    raw_light[ch * 2 + 1] = (uint8_t)(spectrum.channel[ch] >> 8);
+                /*
+                 * Pack spectral channels into raw_light[22]:
+                 *   [0..15]  F1..F8  (ch[0]..ch[7], 8x2 bytes LE)
+                 *   [16..17] Clear   (ch[10], 2nd SMUX pass, LE)
+                 *   [18..19] NIR     (ch[11], 2nd SMUX pass, LE)
+                 *   [20..21] mains_hz (uint16 LE)
+                 *
+                 * AS7341_Spectrum.ch[] layout (as7341_driver.h):
+                 *   low  SMUX: ch[0]=F1, [1]=F2, [2]=F3, [3]=F4,
+                 *              ch[4]=Clear, [5]=NIR
+                 *   high SMUX: ch[6]=F5, [7]=F6, [8]=F7, [9]=F8,
+                 *              ch[10]=Clear, [11]=NIR
+                 */
+                for (uint8_t i = 0; i < 8; i++) {
+                    raw_light[i * 2]     = (uint8_t)(spectrum.ch[i] & 0xFF);
+                    raw_light[i * 2 + 1] = (uint8_t)(spectrum.ch[i] >> 8);
                 }
-                raw_light[16] = (uint8_t)(spectrum.clear  & 0xFF);
-                raw_light[17] = (uint8_t)(spectrum.clear  >> 8);
-                raw_light[18] = (uint8_t)(spectrum.nir    & 0xFF);
-                raw_light[19] = (uint8_t)(spectrum.nir    >> 8);
-                raw_light[20] = (uint8_t)(g_mains_hz      & 0xFF);
-                raw_light[21] = (uint8_t)(g_mains_hz      >> 8);
+                raw_light[16] = (uint8_t)(spectrum.ch[10] & 0xFF);  /* Clear */
+                raw_light[17] = (uint8_t)(spectrum.ch[10] >> 8);
+                raw_light[18] = (uint8_t)(spectrum.ch[11] & 0xFF);  /* NIR   */
+                raw_light[19] = (uint8_t)(spectrum.ch[11] >> 8);
+                raw_light[20] = (uint8_t)(g_mains_hz & 0xFF);
+                raw_light[21] = (uint8_t)(g_mains_hz >> 8);
 
-                AS7341_ParseData(raw_light, &light_data);
-                LightMetrics_Update(&light_data);
+                /*
+                 * LightMetrics_Update(const AS7341_Spectrum *spectrum,
+                 *                     const Time_Struct     *timestamp,
+                 *                     uint16_t               mains_hz)
+                 */
+                LightMetrics_Update(&spectrum, &timestamp, g_mains_hz);
             }
 
             /* ----------------------------------------------------------
@@ -364,31 +342,25 @@ int main(void)
 
             /* ----------------------------------------------------------
              * NAND Flash write
+             * write_packet(uint16_t sample, Time_Struct ts,
+             *              uint8_t *accel, uint8_t *gyro,
+             *              uint8_t *light_raw, uint8_t *NAND_packet)
+             * write_memory(void)
              * ---------------------------------------------------------- */
-            write_packet(&accelerometer_data,
-                         &gyroscope_data,
+            write_packet(sample, timestamp,
                          raw_accelerometer,
                          raw_gyroscope,
-                         NAND_packet, &sample);
-            write_memory(NAND_packet,
-                         &sample,
-                         &blocco_scritto,
-                         &pagina_scritta,
-                         bad_blocks,
-                         &blocco,
-                         &colonna);
+                         raw_light,
+                         NAND_packet);
+            write_memory();
 
-            /* Overflow diagnostic — light the red LED if samples are
-             * being dropped so the issue is immediately visible. */
             if (IMU_RingBuffer_OverflowCount(&g_imu_ring_buffer) > 0) {
                 LED_On(LED_RED);
             }
         }
 
         /* ==============================================================
-         * Mains flicker classification — every 2 s, foreground only.
-         * AS7341_DetectMainsHz() is a long (~20 ms) blocking call;
-         * keeping it here means it can also be preempted by BLE/USB.
+         * Mains flicker classification — every 2 s
          * ============================================================== */
         if ((HAL_GetTick() - g_last_flicker_update_ms) >= FLICKER_UPDATE_PERIOD_MS)
         {
@@ -432,9 +404,9 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLMBOOST      = RCC_PLLMBOOST_DIV2;
   RCC_OscInitStruct.PLL.PLLM            = 2;
   RCC_OscInitStruct.PLL.PLLN            = 12;
+  RCC_OscInitStruct.PLL.PLLR            = 2;
   RCC_OscInitStruct.PLL.PLLP            = 2;
   RCC_OscInitStruct.PLL.PLLQ            = 3;
-  RCC_OscInitStruct.PLL.PLLR            = 2;
   RCC_OscInitStruct.PLL.PLLRGE         = RCC_PLLVCIRANGE_1;
   RCC_OscInitStruct.PLL.PLLFRACN       = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
@@ -629,46 +601,45 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
-  HAL_GPIO_WritePin(GPIOC, LED_RED_Pin | LED_GREEN_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOD, SPI_NAND_CS_Pin, GPIO_PIN_SET);
+  /* --- Output pins: LEDs and NAND CS ------------------------------------ */
+  HAL_GPIO_WritePin(MCU_GREEN_LED_GPIO_Port, MCU_GREEN_LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(MCU_RED_LED_GPIO_Port,   MCU_RED_LED_Pin,   GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(SPI3_CS_NAND_GPIO_Port,  SPI3_CS_NAND_Pin,  GPIO_PIN_SET);
 
-  GPIO_InitStruct.Pin   = LED_RED_Pin | LED_GREEN_Pin;
+  /* Green LED */
+  GPIO_InitStruct.Pin   = MCU_GREEN_LED_Pin;
   GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull  = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  HAL_GPIO_Init(MCU_GREEN_LED_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin   = SPI_NAND_CS_Pin;
-  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull  = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  /* Red LED */
+  GPIO_InitStruct.Pin   = MCU_RED_LED_Pin;
+  HAL_GPIO_Init(MCU_RED_LED_GPIO_Port, &GPIO_InitStruct);
 
+  /* NAND CS */
+  GPIO_InitStruct.Pin   = SPI3_CS_NAND_Pin;
+  HAL_GPIO_Init(SPI3_CS_NAND_GPIO_Port, &GPIO_InitStruct);
+
+  /* User button */
   GPIO_InitStruct.Pin  = USER_BUTTON_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USER_BUTTON_GPIO_Port, &GPIO_InitStruct);
 
+  /* IMU interrupt pins */
   GPIO_InitStruct.Pin  = IMU_IS_INT1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(IMU_IS_INT1_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin  = IMU_IS_INT2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(IMU_IS_INT2_GPIO_Port, &GPIO_InitStruct);
 
+  /* Auxiliary I/O pins */
   GPIO_InitStruct.Pin  = MCU_I_O_1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(MCU_I_O_1_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin  = MCU_I_O_2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(MCU_I_O_2_GPIO_Port, &GPIO_InitStruct);
-  /* NVIC priorities are set in main() after all inits, before TIM2 start */
 }
 
 /* USER CODE BEGIN 4 */
