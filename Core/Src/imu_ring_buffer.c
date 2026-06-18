@@ -20,7 +20,7 @@
 IMU_RingBuffer_t g_imu_ring_buffer;
 
 /* --------------------------------------------------------------------------
- * Fetch flag — set by TIM2 ISR, cleared by main loop.
+ * Fetch flag — set by IMU EXTI ISR, cleared by main loop.
  * Volatile: compiler must re-read from RAM on every access.
  * -------------------------------------------------------------------------- */
 volatile uint8_t g_imu_fetch_flag = 0U;

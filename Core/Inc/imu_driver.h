@@ -114,4 +114,12 @@ void IMU_ReadAccelerometerData(IMU_Data *acc_data, uint8_t *raw_data);
  */
 void IMU_ReadGyroscopeData(IMU_Data *gyro_data, uint8_t *raw_data);
 
+// --- Fetch Path (I2C Reads) ---
+void IMU_ReadAccelerometerRaw(uint8_t *raw_data);
+void IMU_ReadGyroscopeRaw(uint8_t *raw_data);
+
+// --- Drain Path (DSP Math) ---
+void IMU_ConvertAccelRawToFloat(IMU_Data *acc_data, const uint8_t *raw_data);
+void IMU_ConvertGyroRawToFloat(IMU_Data *gyro_data, const uint8_t *raw_data);
+
 #endif /* __IMU_DRIVER_H__ */

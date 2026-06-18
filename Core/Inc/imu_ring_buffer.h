@@ -10,7 +10,7 @@
  * Architecture overview
  * ============================================================
  *
- *  TIM2 ISR  (every 10 ms, priority 6)
+ *  EXTI ISR (IMU_IS_INT1_Pin, priority 6)
  *  ─────────────────────────────────────────────────────────
  *  1. Set  g_imu_fetch_flag = 1          (< 1 µs)
  *  2. Increment g_light_tick             (< 1 µs)
@@ -31,13 +31,12 @@
  * NVIC priority table (lower number = higher priority)
  * ============================================================
  *
- *  Priority 5  USART3_IRQn    — BLE radio link (RN4871 UART)
+ *  Priority 5  USART3_IRQn   — BLE radio link (RN4871 UART)
  *  Priority 5  OTG_FS_IRQn   — USB Virtual COM Port
- *  Priority 6  TIM2_IRQn     — 100 Hz acquisition tick (tripwire only)
+ *  Priority 6  EXTI_IRQn     — IMU_IS_INT1_Pin (100 Hz tripwire, flag only)
  *  Priority 6  EXTI*_IRQn    — Button + IMU data-ready pins
  *
  *  With this table:
- *  - A BLE UART event will always preempt the TIM2 ISR.
  *  - The main loop I2C blocking call can be preempted by ANY IRQ
  *    because it runs at thread priority (effectively priority 15+).
  *  - The 100 ms I2C timeout in the worst case only stalls the
@@ -70,7 +69,7 @@
 #define IMU_RB_MASK  (IMU_RB_SIZE - 1U)
 
 /* --------------------------------------------------------------------------
- * Fetch flag — set by TIM2 ISR, cleared by main loop.
+ * Fetch flag — set by IMU EXTI ISR, cleared by main loop.
  *
  * Declared volatile so the compiler never caches it in a register.
  * The main loop must clear it inside a __disable_irq / __enable_irq

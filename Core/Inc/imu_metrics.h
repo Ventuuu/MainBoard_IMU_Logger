@@ -40,7 +40,7 @@ extern "C" {
 
 /* --- Configuration constants -------------------------------------------- */
 
-/** IMU sample rate (Hz). Must match TIM2 configuration in main.c. */
+/** IMU sample rate (Hz). Must match LSM6DSO16IS ODR configuration. */
 #define IMU_METRICS_SAMPLE_RATE_HZ    100U
 
 /** Debounce lockout after a step detection (samples at 100 Hz = 300 ms). */
@@ -64,9 +64,10 @@ typedef enum {
 } ImuActivityState;
 
 /* --- Public API ---------------------------------------------------------- */
-
+void IMU_ConvertAccelRawToFloat(IMU_Data *out_data, const uint8_t *raw_bytes);
+void IMU_ConvertGyroRawToFloat(IMU_Data *out_data, const uint8_t *raw_bytes);
 /**
- * @brief Process one IMU sample (call from TIM2 ISR at 100 Hz).
+ * @brief Process one IMU sample (called sequentially from main loop drain path).
  *
  * @param acc   Pointer to accelerometer data in g  (already converted by driver).
  * @param gyro  Pointer to gyroscope data in dps    (already converted by driver).

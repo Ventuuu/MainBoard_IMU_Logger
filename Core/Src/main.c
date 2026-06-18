@@ -38,7 +38,7 @@
   * ---------------------------------------------------------------------------
   *  Priority 5  USART3_IRQn   — RN4871 BLE UART
   *  Priority 5  OTG_FS_IRQn   — USB VCP
-  *  Priority 6  TIM2_IRQn     — 100 Hz tripwire (flag only)
+  *  Priority 6  EXTI Interrupt (IMU_IS_INT1_Pin)     — 100 Hz tripwire (flag only)
   *  Priority 6  EXTI*_IRQn    — USER_BUTTON, IMU data-ready
   ******************************************************************************
   */
@@ -141,7 +141,7 @@ static void MX_I2C3_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_MDF1_Init(void);
-static void MX_TIM2_Init(void);
+//static void MX_TIM2_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
 
@@ -160,14 +160,14 @@ static void MX_SPI3_Init(void);
  * Duration target: < 1 µs  (verified: 2 instructions + return)
  * ============================================================ */
 /* USER CODE BEGIN 0 */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-    if (htim != &htim2) return;
-    if (current_state != STATE_ACQUISITION) return;
+// void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) -> no longer needed since we're using the timer purely as a tripwire to set a flag, and not for any timing-sensitive operations. The main loop can check the flag and perform the necessary I2C reads and processing without being constrained by the ISR execution time.
+// {
+//     if (htim != &htim2) return;
+//     if (current_state != STATE_ACQUISITION) return;
 
-    g_imu_fetch_flag = 1U;
-    g_light_tick++;
-}
+//     g_imu_fetch_flag = 1U;
+//     g_light_tick++;
+// }
 /* USER CODE END 0 */
 
 /**
@@ -187,7 +187,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_MDF1_Init();
-  MX_TIM2_Init();
+  // MX_TIM2_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
 
@@ -228,14 +228,14 @@ int main(void)
    */
   HAL_NVIC_SetPriority(USART3_IRQn,  5, 0);
   HAL_NVIC_SetPriority(OTG_FS_IRQn,  5, 0);
-  HAL_NVIC_SetPriority(TIM2_IRQn,    6, 0);
+  // HAL_NVIC_SetPriority(TIM2_IRQn,    6, 0); no longer using TIM2
   HAL_NVIC_SetPriority(EXTI0_IRQn,   6, 0);
   HAL_NVIC_SetPriority(EXTI4_IRQn,   6, 0);
   HAL_NVIC_SetPriority(EXTI5_IRQn,   6, 0);
   HAL_NVIC_SetPriority(EXTI10_IRQn,  6, 0);
   HAL_NVIC_SetPriority(EXTI13_IRQn,  6, 0);
 
-  HAL_TIM_Base_Start_IT(&htim2);
+  // HAL_TIM_Base_Start_IT(&htim2); no longer using TIM2 to poll the sensor, leaving it running wastes power and CPU cycles.
 
   LED_Off(LED_RED);
   /* USER CODE END 2 */
@@ -263,10 +263,9 @@ int main(void)
       case STATE_ACQUISITION:
       {
         /* ==============================================================
-         * FETCH PATH — read IMU in thread context (NVIC-preemptible)
+         * 1. FETCH PATH — Triggered by IMU EXTI Data-Ready Pin
          * ============================================================== */
         uint8_t do_fetch;
-
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
         do_fetch         = g_imu_fetch_flag;
@@ -275,9 +274,11 @@ int main(void)
 
         if (do_fetch)
         {
-            IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
-            IMU_ReadGyroscopeData    (&gyroscope_data,     raw_gyroscope);
+            // 1. Read the physical I2C bus ONCE (Raw bytes only!)
+            IMU_ReadAccelerometerRaw(raw_accelerometer);
+            IMU_ReadGyroscopeRaw(raw_gyroscope);
 
+            // 2. Push to buffer
             IMU_RawData_t raw_sample;
             memcpy(raw_sample.acc,  raw_accelerometer, 6);
             memcpy(raw_sample.gyro, raw_gyroscope,     6);
@@ -285,19 +286,18 @@ int main(void)
         }
 
         /* ==============================================================
-         * DRAIN PATH — one buffered sample per loop iteration
+         * 2. DRAIN PATH — Empty the entire buffer
          * ============================================================== */
         IMU_RawData_t popped;
-        if (IMU_RingBuffer_Pop(&g_imu_ring_buffer, &popped))
+        
+        // Loop to drain ALL pending samples from the buffer
+        while (IMU_RingBuffer_Pop(&g_imu_ring_buffer, &popped))
         {
-            memcpy(raw_accelerometer, popped.acc,  6);
-            memcpy(raw_gyroscope,     popped.gyro, 6);
-            IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
-            IMU_ReadGyroscopeData    (&gyroscope_data,     raw_gyroscope);
+            // 1. Convert raw bytes to float (No I2C calls here!)
+            IMU_ConvertAccelRawToFloat(&accelerometer_data, popped.acc);
+            IMU_ConvertGyroRawToFloat(&gyroscope_data,     popped.gyro);
 
-            /* ----------------------------------------------------------
-             * IMU metrics — step count, cadence, activity state (100 Hz)
-             * ---------------------------------------------------------- */
+            // 2. Update Kinematics (100 Hz)
             ImuMetrics_Update(&accelerometer_data, &gyroscope_data);
 
             /* ----------------------------------------------------------
@@ -310,45 +310,19 @@ int main(void)
 
                 AS7341_ReadFullSpectrum(&spectrum);
 
-                /*
-                 * Pack spectral channels into raw_light[22]:
-                 *   [0..15]  F1..F8  (ch[0]..ch[7], 8x2 bytes LE)
-                 *   [16..17] Clear   (ch[10], 2nd SMUX pass, LE)
-                 *   [18..19] NIR     (ch[11], 2nd SMUX pass, LE)
-                 *   [20..21] mains_hz (uint16 LE)
-                 *
-                 * AS7341_Spectrum.ch[] layout (as7341_driver.h):
-                 *   low  SMUX: ch[0]=F1, [1]=F2, [2]=F3, [3]=F4,
-                 *              ch[4]=Clear, [5]=NIR
-                 *   high SMUX: ch[6]=F5, [7]=F6, [8]=F7, [9]=F8,
-                 *              ch[10]=Clear, [11]=NIR
-                 */
+                // Pack spectral channels into raw_light[22]
                 for (uint8_t i = 0; i < 8; i++) {
                     raw_light[i * 2]     = (uint8_t)(spectrum.ch[i] & 0xFF);
                     raw_light[i * 2 + 1] = (uint8_t)(spectrum.ch[i] >> 8);
                 }
-                raw_light[16] = (uint8_t)(spectrum.ch[10] & 0xFF);  /* Clear */
+                raw_light[16] = (uint8_t)(spectrum.ch[10] & 0xFF);  
                 raw_light[17] = (uint8_t)(spectrum.ch[10] >> 8);
-                raw_light[18] = (uint8_t)(spectrum.ch[11] & 0xFF);  /* NIR   */
+                raw_light[18] = (uint8_t)(spectrum.ch[11] & 0xFF);  
                 raw_light[19] = (uint8_t)(spectrum.ch[11] >> 8);
                 raw_light[20] = (uint8_t)(g_mains_hz & 0xFF);
                 raw_light[21] = (uint8_t)(g_mains_hz >> 8);
 
-                /*
-                 * LightMetrics_Update returns 1 once per 1-second window
-                 * (every LIGHT_METRICS_WINDOW = 10 calls at 10 Hz).
-                 * Only send the unified BLE packet when metrics are fresh.
-                 *
-                 * BLE_UnifiedPayload field sources:
-                 *   stepCount     <- ImuMetrics_GetStepCount()    (uint32 → uint16)
-                 *   cadence       <- ImuMetrics_GetCadence()      (uint16 → uint8)
-                 *   activityState <- ImuMetrics_GetActivityState() (enum cast)
-                 *   uvRisk        <- LightMetrics_GetUvRisk()       (Q15)
-                 *   blueLightIntensity <- LightMetrics_GetBlueIndex()
-                 *   blueLightRatio     <- LightMetrics_GetBlueFracQ15()      (Q15)
-                 *   sunLikeIndex       <- LightMetrics_GetSunLikeIndexQ15()  (Q15)
-                 *   metric1_clear      <- spectrum.ch[10]  (Clear, 2nd SMUX)
-                 */
+                // LightMetrics_Update handles the 1-second BLE transmission logic
                 if (LightMetrics_Update(&spectrum, &timestamp, g_mains_hz))
                 {
                     BLE_UnifiedPayload ble_payload;
@@ -360,31 +334,37 @@ int main(void)
                     ble_payload.blueLightRatio      = LightMetrics_GetBlueFracQ15();
                     ble_payload.sunLikeIndex        = LightMetrics_GetSunLikeIndexQ15();
                     ble_payload.metric1_clear       = spectrum.ch[10];
+                    
                     BLE_SendUnifiedPacket(&ble_payload);
                 }
             }
 
-            /* ----------------------------------------------------------
-             * NAND Flash write
-             * write_packet(uint16_t sample, Time_Struct ts,
-             *              uint8_t *accel, uint8_t *gyro,
-             *              uint8_t *light_raw, uint8_t *NAND_packet)
-             * write_memory(void)
-             * ---------------------------------------------------------- */
-            write_packet(sample, timestamp,
-                         raw_accelerometer,
-                         raw_gyroscope,
-                         raw_light,
-                         NAND_packet);
-            write_memory();
+        /* ==============================================================
+         * 3. NAND FLASH PATH 
+         * ============================================================== */
+          // A. Increment the sequential sample counter
+          sample++;
+          //B. Update the timestamp.
+          timestamp.sss = HAL_GetTick();
+          // RTC_TimeTypeDef sTime; -> to be implemented if we want to use the RTC instead of HAL_GetTick() for timestamping
+          // RTC_DateTypeDef sDate;
+          // HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+          // HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN); // Must call Date after Time to unlock registers
+          // timestamp.hours = sTime.Hours;
+          // timestamp.minutes = sTime.Minutes;
+          // timestamp.seconds = sTime.Seconds;
 
-            if (IMU_RingBuffer_OverflowCount(&g_imu_ring_buffer) > 0) {
-                LED_On(LED_RED);
-            }
+        write_packet(sample, timestamp, popped.acc, popped.gyro, raw_light, NAND_packet);
+        write_memory();
+        }
+
+        // Check for Buffer Overflows
+        if (IMU_RingBuffer_OverflowCount(&g_imu_ring_buffer) > 0) {
+            LED_On(LED_RED);
         }
 
         /* ==============================================================
-         * Mains flicker classification — every 2 s
+         * 4. Mains flicker classification
          * ============================================================== */
         if ((HAL_GetTick() - g_last_flicker_update_ms) >= FLICKER_UPDATE_PERIOD_MS)
         {
@@ -565,23 +545,23 @@ static void MX_SPI3_Init(void)
   if (HAL_SPIEx_SetConfigAutonomousMode(&hspi3, &cfg) != HAL_OK) Error_Handler();
 }
 
-static void MX_TIM2_Init(void)
-{
-  TIM_ClockConfigTypeDef  sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig      = {0};
-  htim2.Instance               = TIM2;
-  htim2.Init.Prescaler         = 7200 - 1;
-  htim2.Init.CounterMode       = TIM_COUNTERMODE_UP;
-  htim2.Init.Period            = 99;
-  htim2.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK) Error_Handler();
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK) Error_Handler();
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK) Error_Handler();
-}
+// static void MX_TIM2_Init(void)
+// {
+//   TIM_ClockConfigTypeDef  sClockSourceConfig = {0};
+//   TIM_MasterConfigTypeDef sMasterConfig      = {0};
+//   htim2.Instance               = TIM2;
+//   htim2.Init.Prescaler         = 7200 - 1;
+//   htim2.Init.CounterMode       = TIM_COUNTERMODE_UP;
+//   htim2.Init.Period            = 99;
+//   htim2.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+//   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+//   if (HAL_TIM_Base_Init(&htim2) != HAL_OK) Error_Handler();
+//   sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+//   if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK) Error_Handler();
+//   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+//   sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+//   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK) Error_Handler();
+// }
 
 static void MX_USART3_UART_Init(void)
 {
@@ -653,9 +633,13 @@ static void MX_GPIO_Init(void)
 
   /* IMU interrupt pins */
   GPIO_InitStruct.Pin  = IMU_IS_INT1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING; 
+  GPIO_InitStruct.Pull = GPIO_NOPULL;         
   HAL_GPIO_Init(IMU_IS_INT1_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin  = IMU_IS_INT2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING; 
+  GPIO_InitStruct.Pull = GPIO_NOPULL;         
   HAL_GPIO_Init(IMU_IS_INT2_GPIO_Port, &GPIO_InitStruct);
 
   /* Auxiliary I/O pins */
@@ -669,6 +653,15 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+  // --- 1. Handle the IMU 100Hz Interrupt ---
+  if (GPIO_Pin == IMU_IS_INT1_Pin) 
+  {
+      // Just set the flag and exit. Do not put I2C reads here!
+      g_imu_fetch_flag = 1U;
+      g_light_tick++;
+  }
+
+  // --- 2. Handle the User Button ---
   if (GPIO_Pin == USER_BUTTON_Pin)
   {
     switch (current_state)

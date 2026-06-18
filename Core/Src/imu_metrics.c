@@ -185,7 +185,7 @@ void ImuMetrics_Reset(void)
 }
 
 /* -------------------------------------------------------------------------
- * Public: update (call at 100 Hz from TIM2 ISR)
+ * Public: update (called from main loop drain path)
  * ---------------------------------------------------------------------- */
 
 void ImuMetrics_Update(const IMU_Data *acc, const IMU_Data *gyro)
@@ -279,6 +279,20 @@ void ImuMetrics_Update(const IMU_Data *acc, const IMU_Data *gyro)
 
     s_prev2_filt = s_prev_filt;
     s_prev_filt  = filt;
+
+    /* ------------------------------------------------------------------
+     * 6. Cadence Timeout (Zeroing)
+     * ------------------------------------------------------------------ */
+    if (s_ts_count > 0U) {
+        // Find the index of the most recently recorded step
+        uint8_t newest_idx = (s_ts_head + IMU_METRICS_CADENCE_BUF - 1U) % IMU_METRICS_CADENCE_BUF;
+        uint32_t ticks_since_last_step = s_tick - s_step_ts[newest_idx];
+        
+        // If 200 ticks (2.0 seconds at 100 Hz) have passed without a step, user has stopped.
+        if (ticks_since_last_step > 200U) { 
+            s_cadence = 0U;
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------
