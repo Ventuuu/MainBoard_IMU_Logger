@@ -75,7 +75,7 @@ Byte 1 Value	Name	Usage
 0x02	GYRO	Dev Mode: High-frequency raw X,Y,Z angular rate
 0x0C	BATTERY	Production: Asynchronous battery level notifications
 
-UNIFIED_STATE Payload (0x55)
+## UNIFIED_STATE Payload (0x55)
 
 All multi-byte values are transmitted in Little-Endian byte order.
 Byte  0     1      2–3         4         5              6–7        8–9
@@ -94,7 +94,7 @@ blueRatio	10–11	uint16_t	Q15 fraction (0.0 – 1.0) of blue spectrum
 sunLikeIndex	12–13	uint16_t	Q15 fraction (0.0 – 1.0)
 clearChannel	14–15	uint16_t	Broad-spectrum illuminance proxy
 
-Photobiology Metrics (light_metrics_mcu.c)
+## Photobiology Metrics (light_metrics_mcu.c)
 
 The AS7341 SMUX is dynamically reconfigured to capture both visible and NIR bands.
 Metric	Derivation Math (Q15 Fixed-Point)
@@ -103,7 +103,7 @@ Blue Ratio	F2 / (F1 + F2 + F3 + F4 + F5 + F6 + F7 + F8). Used by client to calcu
 SunLike Index	NIR / Visible_Sum. Used to discriminate between direct sunlight (>0.80) and artificial indoor light (<0.35).
 Clear Channel	Raw un-filtered photodiode count representing overall environmental brightness.
 
-IMU Metrics (imu_metrics.c)
+## IMU Metrics (imu_metrics.c)
 
 Raw sensors are configured to ±4 g (Accel) and ±250 dps (Gyro).
 Metric	Description
@@ -111,7 +111,7 @@ Step count	Evaluated via a dynamic threshold-crossing detector acting on the ver
 Cadence	Computed over a sliding 5-second window. Drops to 0 after 2 seconds of rest.
 Activity state	Fused classification using cadence and resultant acceleration magnitude.
 
-Getting Started
+## Getting Started
 Compiling & Flashing (STM32CubeIDE)
 
     Open MainBoard_IMU_Logger.ioc in STM32CubeIDE 1.15+.
@@ -126,13 +126,13 @@ Compiling & Flashing (STM32CubeIDE)
 cmake --preset Release
 cmake --build build/Release
 
-BLE Interfacing
-Attribute	UUID
+## BLE Interfacing
+### Attribute	UUID
 Service	6E400001-B5A3-F393-E0A9-E50E24DCCA9E
 TX (Notify)	6E400003-B5A3-F393-E0A9-E50E24DCCA9E
 RX (Write)	6E400002-B5A3-F393-E0A9-E50E24DCCA9E
 
-Branch Guide
-Branch	Description
+## Branch Guide
+### Branch	Description
 main	Stable v1 baseline — High-frequency IMU logging directly to NAND.
 edge-dsp-v2	Active deployment — On-device Q15 data fusion, 1 Hz telemetry framing (0x55), and decoupled lock-free IMU buffering.

@@ -11,6 +11,7 @@
 
 #include "stdio.h"
 #include "stdint.h"
+#include <stdbool.h>
 
 // --- Constants Definitions ---
 #define PACKET_LENGTH  20    // Total BLE packet length in bytes
@@ -85,10 +86,13 @@ void BLE_ExitLowPowerMode(void);
 void BLE_SetSlowAdvertisements(void);
 void BLE_SendData(uint8_t *data, uint8_t data_length);
 void BLE_ReceiveData(uint8_t *data, uint8_t data_length);
-
+void BLE_StartRXInterrupt(void);
+bool BLE_IsRawModeActive(void);
+void BLE_SendBatteryPacket(uint8_t battery_percent);
 // Legacy packet sender (backward compatible)
 void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t *data_buffer);
 
+void BLE_SendRawLightPacket(uint8_t *raw_light_array);
 /**
  * @brief Serialise and transmit a unified 20-byte sensor packet.
  *

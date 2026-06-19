@@ -114,6 +114,9 @@ static          uint8_t g_light_tick_last = 0U;
 static volatile uint16_t g_mains_hz              = 0U;
 static          uint32_t g_last_flicker_update_ms = 0U;
 
+// NEW: Battery telemetry tracker
+// static          uint32_t g_last_battery_update_ms = 0U;
+
 /* --- NAND Flash ----------------------------------------------------------- */
 uint8_t  NAND_packet[4096] = {0};
 uint16_t sample            = 0;
@@ -195,6 +198,7 @@ int main(void)
   LED_On(LED_RED);
 
   BLE_Initialize();
+  BLE_StartRXInterrupt();
   MX_USB_Device_Init();
   HAL_Delay(1000);
 
@@ -244,6 +248,7 @@ int main(void)
    * Infinite loop
    * ----------------------------------------------------------------------- */
   /* USER CODE BEGIN WHILE */
+    
   while (1)
   {
   /* USER CODE END WHILE */
@@ -300,6 +305,14 @@ int main(void)
             // 2. Update Kinematics (100 Hz)
             ImuMetrics_Update(&accelerometer_data, &gyroscope_data);
 
+            // Transmit the 100Hz raw bytes immediately if Dev Mode is active
+            // ----------------------------------------------------------
+            if (BLE_IsRawModeActive()) 
+            {
+                BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, popped.acc);
+                // BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, popped.gyro); 
+            }
+
             /* ----------------------------------------------------------
              * Light sensor — triggered every LIGHT_SUBSAMPLE ticks (10 Hz)
              * ---------------------------------------------------------- */
@@ -325,6 +338,18 @@ int main(void)
                 // LightMetrics_Update handles the 1-second BLE transmission logic
                 if (LightMetrics_Update(&spectrum, &timestamp, g_mains_hz))
                 {
+                  // ----------------------------------------------------------
+                    // DEVELOPER MODE ROUTING
+                    // ----------------------------------------------------------
+                    // Only build and send the 0x55 packet if we are NOT in Raw Mode
+                    // ----------------------------------------------------------
+                    if (BLE_IsRawModeActive()) 
+                    {
+                        // Raw spectral packets - 8 channels
+                        BLE_SendRawLightPackets(raw_light);
+                    } 
+                    else 
+                    {  
                     BLE_UnifiedPayload ble_payload;
                     ble_payload.stepCount           = (uint16_t)ImuMetrics_GetStepCount();
                     ble_payload.cadence             = (uint8_t)ImuMetrics_GetCadence();
@@ -336,6 +361,7 @@ int main(void)
                     ble_payload.metric1_clear       = spectrum.ch[10];
                     
                     BLE_SendUnifiedPacket(&ble_payload);
+                    }
                 }
             }
 
@@ -371,6 +397,21 @@ int main(void)
             g_mains_hz = AS7341_DetectMainsHz();
             g_last_flicker_update_ms = HAL_GetTick();
         }
+        
+        // /* ==============================================================
+        //  * 5. Battery Telemetry (Every 60 seconds)
+        //  * ============================================================== */
+        // if ((HAL_GetTick() - g_last_battery_update_ms) >= 60000U)
+        // {
+        //     g_last_battery_update_ms = HAL_GetTick();
+            
+        //     // TODO: Read your actual ADC pin here to get the real battery voltage
+        //     // uint32_t raw_adc = HAL_ADC_GetValue(&hadc1);
+        //     // uint8_t batt_pct = calculate_percentage(raw_adc);
+            
+        //     uint8_t batt_pct = 85; // Hardcoded placeholder for now
+        //     BLE_SendBatteryPacket(batt_pct);
+        // }
 
         break;
       }
