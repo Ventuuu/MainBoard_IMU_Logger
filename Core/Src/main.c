@@ -105,7 +105,6 @@ uint8_t raw_accelerometer[6] = {0};
 uint8_t raw_gyroscope[6]     = {0};
 
 // --- Light sensor data ---
-static AS7341_Data light_data;
 static AS7341_Spectrum spectrum;        /* full spectral frame */
 
 /*
@@ -192,7 +191,6 @@ static void StopAcquisition(void)
     current_state = STATE_IDLE;
 
     LED_Off(LED_GREEN);
-    LED_On(LED_BLUE);
 }
 
 static void ProcessSensorTick(void)
@@ -373,21 +371,10 @@ MX_SPI3_Init();
 	  {
       case STATE_IDLE:
 
-<<<<<<< HEAD
         if (start_acquisition_requested)
         {
           start_acquisition_requested = 0U;
 
-          LED_Off(LED_BLUE);
-=======
-          if (!usb_flag)
-          {
-          /* existing idle behavior */
-        }
-        else
-        {
-          current_state = STATE_USB_CONNECTED;
->>>>>>> dface4cf84a25cc89c78a18d1f415275a81ae3d2
           LED_On(LED_GREEN);
 
           if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
@@ -426,13 +413,11 @@ MX_SPI3_Init();
         {
           current_state = STATE_USB_CONNECTED;
 
-          LED_Off(LED_BLUE);
           LED_On(LED_GREEN);
         }
         else
         {
           LED_Off(LED_GREEN);
-          LED_On(LED_BLUE);
         }
 
         break;

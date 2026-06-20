@@ -45,8 +45,6 @@ extern uint8_t bad_blocks2[2048];
 extern uint8_t data_letto[4096];
 extern int exit_flag;
 
-static AppState current_state;
-
 // SPI basic functions
 void cs_deselect(void);
 void cs_select(void);
@@ -725,7 +723,7 @@ int spi_read(uint8_t *read_buff, size_t read_len, uint32_t timeout_ms)
     return SPI_NAND_RET_OK;
 }
 
-int spi_write(uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
+int spi_write(const uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
 {
 	int r = HAL_SPI_Transmit(&hspi2, write_buff, write_len, timeout_ms);
     return r;
