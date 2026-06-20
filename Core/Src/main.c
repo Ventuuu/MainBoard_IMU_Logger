@@ -36,6 +36,7 @@
 #include "led_driver.h"
 #include "imu_driver.h"
 #include "bluetooth.h"
+#include <stdint.h>
 
 /* USER CODE END Includes */
 
@@ -62,6 +63,7 @@ I2C_HandleTypeDef hi2c3;
 
 MDF_HandleTypeDef MdfHandle0;
 MDF_FilterConfigTypeDef MdfFilterConfig0;
+MDF_DmaConfigTypeDef Dma_config;
 
 SPI_HandleTypeDef hspi2;
 SPI_HandleTypeDef hspi3;
@@ -213,14 +215,14 @@ int main(void)
 
   /* USER CODE END 2 */
   // initialize Microphone with triber
-    if (PDM_Microphone_Init(&MdfHandle0) != HAL_OK) {
-        Error_Handler();
-    }
-
-    // start Microphone-recording 
-    //if (PDM_Microphone_Start(&MdfHandle0) != HAL_OK) {
-    if (PDM_Microphone_Start(&MdfHandle0, &huart3) != HAL_OK){
+  if (PDM_Microphone_Init(&MdfHandle0, &MdfFilterConfig0) != HAL_OK) {
     Error_Handler();
+  }
+  // start Microphone-recording 
+  //if (PDM_Microphone_Start(&MdfHandle0) != HAL_OK) {
+    if (PDM_Microphone_Start(&MdfHandle0, &huart3, &Dma_config) != HAL_OK){
+      LED_On(LED_RED);
+      Error_Handler();
     }
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -427,17 +429,13 @@ static void MX_MDF1_Init(void)
   MdfHandle0.Init.SerialInterface.ClockSource = MDF_SITF_CCK0_SOURCE;
   MdfHandle0.Init.SerialInterface.Threshold = 31;
   MdfHandle0.Init.FilterBistream = MDF_BITSTREAM0_RISING;
-  if (HAL_MDF_Init(&MdfHandle0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
+  
   /**
     MdfFilterConfig0, MdfOldConfig0 and/or MdfScdConfig0 structures initialization
 
     WARNING : only structures are filled, no specific init function call for filter
   */
-  /**MdfFilterConfig0.DataSource = MDF_DATA_SOURCE_BSMX;
+  MdfFilterConfig0.DataSource = MDF_DATA_SOURCE_BSMX;
   MdfFilterConfig0.Delay = 0;
   MdfFilterConfig0.CicMode = MDF_ONE_FILTER_SINC5;
   MdfFilterConfig0.DecimationRatio = 16;
@@ -454,7 +452,18 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.DiscardSamples = 255;
   MdfFilterConfig0.Trigger.Source = MDF_CLOCK_TRIG_TRGO;
   MdfFilterConfig0.Trigger.Edge = MDF_FILTER_TRIG_RISING_EDGE;
-  */
+  
+  Dma_config.Address = (uint32_t)MIC_BUFFER;
+  Dma_config.DataLength = 1 * sizeof(uint32_t);
+  Dma_config.MsbOnly = 0;
+
+
+
+
+  if (HAL_MDF_Init(&MdfHandle0) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN MDF1_Init 2 */
 
   /* USER CODE END MDF1_Init 2 */

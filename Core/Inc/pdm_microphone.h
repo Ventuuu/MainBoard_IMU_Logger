@@ -4,7 +4,7 @@
 #include "main.h" // Ermöglicht den Zugriff auf alle HAL-Typen (inkl. MDF und UART)
 
 #define AUDIO_REC_BUFF_SIZE 1024
-
+#define MIC_BUFFER     0x34 // mic memory address
 // --- Funktionen für die main.c ---
 
 /**
@@ -12,7 +12,7 @@
  * @param hmdf Zeiger auf das MDF-Handle
  * @retval HAL-Status (HAL_OK bei Erfolg)
  */
-HAL_StatusTypeDef PDM_Microphone_Init(MDF_HandleTypeDef *hmdf);
+HAL_StatusTypeDef PDM_Microphone_Init(MDF_HandleTypeDef *hmdf, MDF_FilterConfigTypeDef *MdfFilterConfig0);
 
 /**
  * @brief Startet die Audio-Aufnahme über DMA und registriert das UART-Handle für das Senden.
@@ -20,6 +20,6 @@ HAL_StatusTypeDef PDM_Microphone_Init(MDF_HandleTypeDef *hmdf);
  * @param huart Zeiger auf das UART-Handle (für die automatische DMA-Übertragung im Hintergrund)
  * @retval HAL-Status (HAL_OK bei Erfolg)
  */
-HAL_StatusTypeDef PDM_Microphone_Start(MDF_HandleTypeDef *hmdf, UART_HandleTypeDef *huart);
+HAL_StatusTypeDef PDM_Microphone_Start(MDF_HandleTypeDef *hmdf, UART_HandleTypeDef *huart,MDF_DmaConfigTypeDef *Dma_config);
 
 #endif // PDM_MICROPHONE_H
