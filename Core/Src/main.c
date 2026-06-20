@@ -53,6 +53,8 @@
 
 /* Light sensor is sampled every LIGHT_SUBSAMPLE IMU ticks (100 Hz / 10 = 10 Hz) */
 #define LIGHT_SUBSAMPLE  10U
+#define LED_USB_CONNECTED_TOGGLE_MS  500U
+#define LED_DOWNLOAD_TOGGLE_MS       125U
 
 /* USER CODE END PD */
 
@@ -96,6 +98,9 @@ volatile uint8_t usb_flag = 0U;
 static volatile uint8_t start_acquisition_requested = 0U;
 static volatile uint8_t stop_acquisition_requested = 0U;
 static volatile uint32_t sensor_tick_pending = 0U;
+static AppState led_state = STATE_IDLE;
+static uint8_t led_state_initialized = 0U;
+static uint32_t led_last_toggle_ms = 0U;
 
 // --- IMU data ---
 static IMU_Data accelerometer_data;
@@ -154,6 +159,70 @@ static uint32_t Time_ToMilliseconds(Time_Struct t)
            ((uint32_t)t.sss);
 }
 
+static void UpdateStateLed(AppState state)
+{
+    uint32_t now = HAL_GetTick();
+    uint32_t interval_ms = 0U;
+
+    if ((led_state_initialized == 0U) || (state != led_state))
+    {
+        led_state = state;
+        led_state_initialized = 1U;
+        led_last_toggle_ms = now;
+
+        switch (state)
+        {
+            case STATE_IDLE:
+                LED_Off(LED_GREEN);
+                break;
+            case STATE_ACQUISITION:
+            case STATE_USB_CONNECTED:
+            case STATE_DOWNLOAD:
+                LED_On(LED_GREEN);
+                break;
+            default:
+                LED_Off(LED_GREEN);
+                break;
+        }
+
+        return;
+    }
+
+    switch (state)
+    {
+        case STATE_IDLE:
+            LED_Off(LED_GREEN);
+            break;
+
+        case STATE_ACQUISITION:
+            LED_On(LED_GREEN);
+            break;
+
+        case STATE_USB_CONNECTED:
+            interval_ms = LED_USB_CONNECTED_TOGGLE_MS;
+            break;
+
+        case STATE_DOWNLOAD:
+            interval_ms = LED_DOWNLOAD_TOGGLE_MS;
+            break;
+
+        default:
+            LED_Off(LED_GREEN);
+            break;
+    }
+
+    if ((interval_ms > 0U) && ((now - led_last_toggle_ms) >= interval_ms))
+    {
+        led_last_toggle_ms = now;
+        LED_Toggle(LED_GREEN);
+    }
+}
+
+void App_UpdateDownloadLed(void)
+{
+    UpdateStateLed(STATE_DOWNLOAD);
+}
+
 //--michrophone acquisition complete callback: set flag and stop acquisition to prevent overwriting buffer before processing ----//
 void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 {
@@ -189,8 +258,7 @@ static void StopAcquisition(void)
     stop_acquisition_requested = 0U;
 
     current_state = STATE_IDLE;
-
-    LED_Off(LED_GREEN);
+    UpdateStateLed(current_state);
 }
 
 static void ProcessSensorTick(void)
@@ -366,6 +434,7 @@ MX_SPI3_Init();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+      UpdateStateLed(current_state);
 
 	  switch(current_state)
 	  {
@@ -374,8 +443,6 @@ MX_SPI3_Init();
         if (start_acquisition_requested)
         {
           start_acquisition_requested = 0U;
-
-          LED_On(LED_GREEN);
 
           if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
           {
@@ -394,6 +461,7 @@ MX_SPI3_Init();
           microphone_active = 0U;
           stop_acquisition_requested = 0U;
           current_state = STATE_ACQUISITION;
+          UpdateStateLed(current_state);
           HAL_TIM_Base_Start_IT(&htim2);
 
           break;
@@ -412,12 +480,7 @@ MX_SPI3_Init();
         if (usb_flag)
         {
           current_state = STATE_USB_CONNECTED;
-
-          LED_On(LED_GREEN);
-        }
-        else
-        {
-          LED_Off(LED_GREEN);
+          UpdateStateLed(current_state);
         }
 
         break;
@@ -477,11 +540,13 @@ MX_SPI3_Init();
 	  		 break;
 
 	  	  case STATE_DOWNLOAD:
+          UpdateStateLed(current_state);
 	  		  if (NANDLogger_DownloadAll(&nand_logger) != LOG_OK) 
           { 
           Error_Handler();
           }
 			 current_state = STATE_USB_CONNECTED;
+       UpdateStateLed(current_state);
 	  		 break;
     }
 
@@ -549,6 +614,7 @@ void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 void Error_Handler(void)
 {
   __disable_irq();
+  LED_Off(LED_GREEN);
 
   while (1)
   {

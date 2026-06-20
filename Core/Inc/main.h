@@ -55,6 +55,7 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+void App_UpdateDownloadLed(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

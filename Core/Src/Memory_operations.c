@@ -454,6 +454,7 @@ static LogStatus logger_usb_send(const uint8_t *data, uint16_t len)
 
     while (CDC_Transmit_FS((uint8_t *)data, len) == USBD_BUSY)
     {
+        App_UpdateDownloadLed();
         
         if ((HAL_GetTick() - start_tick) > 1000U)
         {
@@ -461,6 +462,8 @@ static LogStatus logger_usb_send(const uint8_t *data, uint16_t len)
         }
         
     }
+
+    App_UpdateDownloadLed();
 
     /*
      * Delay breve per non saturare la USB CDC.
@@ -547,6 +550,8 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
      */
     for (logical_page = 0U; logical_page < total_pages; logical_page++)
     {
+        App_UpdateDownloadLed();
+
         good_block_index = (uint16_t)(logical_page / NAND_PAGES_PER_BLOCK);
         page_in_block = (uint8_t)(logical_page % NAND_PAGES_PER_BLOCK);
 
@@ -585,6 +590,8 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
         {
             return status;
         }
+
+        App_UpdateDownloadLed();
     }
 
     /*
