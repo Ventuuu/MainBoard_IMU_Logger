@@ -351,7 +351,7 @@ int spi_nand_page_program(read_address_t row, column_address_t column, const uin
     if (SPI_NAND_RET_OK != ret) return ret;
 
     ret = program_load(column, data_in, write_len, SPI_TIMEOUT);
-    //if (SPI_NAND_RET_OK != ret) return ret;
+    if (SPI_NAND_RET_OK != ret) return ret;
 
 
     return program_execute(row, SPI_TIMEOUT);
@@ -773,8 +773,11 @@ void read_memory_and_transmit()
 				break; // exit cycle
 			}
 
-			CDC_Transmit_FS(data_letto, sizeof(data_letto)); // Send data via USB
-			HAL_Delay(10); // wait some time
+			while(CDC_Transmit_FS(data_letto, sizeof(data_letto)) == USBD_BUSY)
+			{
+				HAL_Delay(1); // wait some time	
+			} // Send data via USB
+			
 		}
 		}
 	}

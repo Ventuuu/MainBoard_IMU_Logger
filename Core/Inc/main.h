@@ -106,4 +106,8 @@ typedef enum {
 }
 #endif
 
+/* USER CODE BEGIN ET */
+extern AppState current_state;
+/* USER CODE END ET */
+
 #endif /* __MAIN_H */

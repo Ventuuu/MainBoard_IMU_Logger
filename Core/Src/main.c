@@ -88,7 +88,7 @@ PCD_HandleTypeDef   hpcd_USB_OTG_FS;
 /* USER CODE BEGIN PV */
 
 /* --- State machine -------------------------------------------------------- */
-static AppState current_state = STATE_IDLE;
+AppState current_state = STATE_IDLE;
 
 /* --- Global flags --------------------------------------------------------- */
 uint8_t usb_flag = 0;
@@ -253,6 +253,13 @@ int main(void)
   {
   /* USER CODE END WHILE */
   /* USER CODE BEGIN 3 */
+    // ADD THIS HEARTBEAT: Toggle an LED every 500ms
+    static uint32_t last_blink = 0;
+    if (HAL_GetTick() - last_blink > 500) {
+        last_blink = HAL_GetTick();
+        LED_On(LED_GREEN);
+    }
+    LED_Off(LED_GREEN);
 
     switch (current_state)
     {
@@ -346,7 +353,7 @@ int main(void)
                     if (BLE_IsRawModeActive()) 
                     {
                         // Raw spectral packets - 8 channels
-                        BLE_SendRawLightPackets(raw_light);
+                        //BLE_SendRawLightPacket(raw_light);
                     } 
                     else 
                     {  
@@ -361,6 +368,8 @@ int main(void)
                     ble_payload.metric1_clear       = spectrum.ch[10];
                     
                     BLE_SendUnifiedPacket(&ble_payload);
+
+                    LED_Toggle(LED_RED);    // Blink to indicate a successful BLE transmission
                     }
                 }
             }
