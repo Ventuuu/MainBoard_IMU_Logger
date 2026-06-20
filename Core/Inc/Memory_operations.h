@@ -16,6 +16,7 @@
 #include "SPI_NAND.h"
 
 #include "led_driver.h"
+#include "light_metrics_mcu.h"
 
 /*
  * Packet layout per sample (STRIDE_BYTES_PER_SAMPLE = 40, effective BYTES_PER_SAMPLE = 40):
@@ -25,12 +26,7 @@
  *   [3..4]   sss (milliseconds, little-endian uint16)
  *   [5..10]  accelerometer XYZ (6 bytes raw, LSB first per axis)
  *   [11..16] gyroscope     XYZ (6 bytes raw, LSB first per axis)
- *   [17..32] light spectral filters F1..F8 (8 channels × 2 bytes each, uint16
- *             little-endian, mapping defined in as7341_driver.c and host-side
- *             parser)
- *   [33..34] light Clear channel (2 bytes, LSB first uint16)
- *   [35..36] light NIR   channel (2 bytes, LSB first uint16)
- *   [37..38] mains flicker category in Hz (uint16: 0, 50 or 60)
+ *   [17..38] legacy light area, now reserved and zero-filled
  *   [39]     reserved for future use / alignment
  */
 #define BYTES_PER_SAMPLE         40U   /* logical sample payload size */
@@ -91,6 +87,7 @@ typedef enum
 
 #define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
 #define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
+#define LOG_MAGIC_LIGHT  0x4554494CUL  /* 'LITE' */
 
 
 #define NAND_TOTAL_BLOCKS        2048U
@@ -104,6 +101,7 @@ typedef enum
 
 #define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
 #define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
+#define LOG_MAGIC_LIGHT  0x4554494CUL  /* 'LITE' */
 
 
 typedef struct __attribute__((packed))
@@ -145,6 +143,10 @@ LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,
 LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
                                        const int16_t *audio_buffer,
                                        uint32_t audio_samples,
+                                       uint32_t timestamp_ms);
+
+LogStatus NANDLogger_AppendLightResult(NandLogger *logger,
+                                       const LightSensorResultRecord *result,
                                        uint32_t timestamp_ms);
 
 LogStatus NANDLogger_DownloadAll(NandLogger *logger);

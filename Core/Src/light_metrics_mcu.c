@@ -1,170 +1,292 @@
 /*
  * light_metrics_mcu.c
  *
- * On-MCU implementation of simple light exposure metrics derived from
- * AS7341 spectral data.
- *
- * See light_metrics_mcu.h for high-level documentation.
+ * Session-level AS7341 processing:
+ * - acquire complete F1..F8, NIR and Clear samples;
+ * - apply configurable dark-count correction;
+ * - accumulate valid samples only;
+ * - compute normalized multispectral signature and Clear-based index.
  */
 
 #include "light_metrics_mcu.h"
 
-/* --- Internal storage for latest values and accumulators ------------------ */
+#include <limits.h>
+#include <stddef.h>
+#include <string.h>
 
-static uint16_t s_blueIndex = 0U;          /* F3 + F4 (saturated to 16 bits) */
-static uint16_t s_blueFrac_q15 = 0U;       /* Q15 representation 0..1 → 0..32767 */
-static uint32_t s_uvRisk = 0U;             /* Proxy, arbitrary units */
-static uint32_t s_blueWeightedIll = 0U;    /* Proxy, arbitrary units */
+#include "as7341_processing_config.h"
+#include "main.h"
 
-static uint64_t s_uvDoseAccum = 0ULL;
-static uint64_t s_blueExposureAccum = 0ULL;
-static uint64_t s_circadianDoseAccum = 0ULL;
+#define LIGHT_CHANNEL_COUNT 10U
+#define LIGHT_SIGNATURE_CHANNEL_COUNT 9U
 
-/* New: split blue exposure by light type inferred from flicker classification */
-static uint64_t s_blueExposureArtificialAccum = 0ULL;
-static uint64_t s_blueExposureNaturalAccum    = 0ULL;
-
-/* Default circadian-sensitive window: 20:00–24:00 (local logical time). */
-#define LM_CIRCADIAN_START_H  (20U)
-#define LM_CIRCADIAN_END_H    (24U)
-
-void LightMetrics_Reset(void)
+typedef enum
 {
-    s_blueIndex = 0U;
-    s_blueFrac_q15 = 0U;
-    s_uvRisk = 0U;
-    s_blueWeightedIll = 0U;
-    s_uvDoseAccum = 0ULL;
-    s_blueExposureAccum = 0ULL;
-    s_circadianDoseAccum = 0ULL;
-    s_blueExposureArtificialAccum = 0ULL;
-    s_blueExposureNaturalAccum = 0ULL;
+    LIGHT_CH_F1 = 0,
+    LIGHT_CH_F2,
+    LIGHT_CH_F3,
+    LIGHT_CH_F4,
+    LIGHT_CH_F5,
+    LIGHT_CH_F6,
+    LIGHT_CH_F7,
+    LIGHT_CH_F8,
+    LIGHT_CH_NIR,
+    LIGHT_CH_CLEAR
+} LightChannelIndex;
+
+static const uint16_t s_dark_counts[LIGHT_CHANNEL_COUNT] =
+{
+    AS7341_DARK_F1_COUNTS,
+    AS7341_DARK_F2_COUNTS,
+    AS7341_DARK_F3_COUNTS,
+    AS7341_DARK_F4_COUNTS,
+    AS7341_DARK_F5_COUNTS,
+    AS7341_DARK_F6_COUNTS,
+    AS7341_DARK_F7_COUNTS,
+    AS7341_DARK_F8_COUNTS,
+    AS7341_DARK_NIR_COUNTS,
+    AS7341_DARK_CLEAR_COUNTS
+};
+
+static uint64_t s_sum[LIGHT_CHANNEL_COUNT];
+static uint32_t s_sample_count;
+static uint32_t s_session_start_ms;
+static uint32_t s_session_stop_ms;
+static uint32_t s_last_sample_ms;
+static uint32_t s_error_count;
+static uint32_t s_overflow_drop_count;
+static uint8_t s_session_active;
+static uint8_t s_pending_samples;
+
+static uint16_t light_subtract_dark(uint16_t raw, uint16_t dark)
+{
+    return (raw > dark) ? (uint16_t)(raw - dark) : 0U;
 }
 
-void LightMetrics_Update(const AS7341_Spectrum *spectrum,
-                         const Time_Struct *timestamp,
-                         uint16_t mains_hz)
+static uint8_t light_accumulate_sample(const uint16_t corrected[LIGHT_CHANNEL_COUNT])
 {
-    if (spectrum == NULL || timestamp == NULL) {
+    for (uint8_t i = 0U; i < LIGHT_CHANNEL_COUNT; i++)
+    {
+        if ((UINT64_MAX - s_sum[i]) < corrected[i])
+        {
+            s_overflow_drop_count++;
+            return 0U;
+        }
+    }
+
+    for (uint8_t i = 0U; i < LIGHT_CHANNEL_COUNT; i++)
+    {
+        s_sum[i] += corrected[i];
+    }
+
+    s_sample_count++;
+    return 1U;
+}
+
+static void light_compute_means(uint32_t mean[LIGHT_CHANNEL_COUNT])
+{
+    for (uint8_t i = 0U; i < LIGHT_CHANNEL_COUNT; i++)
+    {
+        mean[i] = 0U;
+    }
+
+    if (s_sample_count == 0U)
+    {
+        return;
+    }
+
+    for (uint8_t i = 0U; i < LIGHT_CHANNEL_COUNT; i++)
+    {
+        mean[i] = (uint32_t)(s_sum[i] / s_sample_count);
+    }
+}
+
+void LightMetrics_Init(void)
+{
+    AS7341_ConfigTimingAndGain(AS7341_PROCESSING_ATIME,
+                               AS7341_PROCESSING_ASTEP,
+                               AS7341_PROCESSING_GAIN);
+    LightMetrics_ResetSession();
+}
+
+void LightMetrics_StartSession(uint32_t session_start_ms)
+{
+    LightMetrics_ResetSession();
+    s_session_active = 1U;
+    s_session_start_ms = session_start_ms;
+    s_session_stop_ms = session_start_ms;
+    s_last_sample_ms = session_start_ms - AS7341_PROCESSING_MIN_PERIOD_MS;
+}
+
+void LightMetrics_RequestSample(void)
+{
+    if (s_session_active != 0U)
+    {
+        s_pending_samples = 1U;
+    }
+}
+
+void LightMetrics_ProcessPendingSample(void)
+{
+    AS7341_Spectrum spectrum;
+    uint16_t corrected[LIGHT_CHANNEL_COUNT];
+    uint32_t now_ms;
+
+    if ((s_session_active == 0U) || (s_pending_samples == 0U))
+    {
+        return;
+    }
+
+    now_ms = HAL_GetTick();
+    if ((uint32_t)(now_ms - s_last_sample_ms) < AS7341_PROCESSING_MIN_PERIOD_MS)
+    {
+        return;
+    }
+
+    s_pending_samples = 0U;
+
+    if (AS7341_ReadFullSpectrum(&spectrum) == 0U)
+    {
+        s_error_count++;
         return;
     }
 
     /*
-     * Channel mapping assumption (matching as7341_driver.c):
-     *   ch[0..7]  → F1..F8
-     *   ch[8]     → Clear
-     *   ch[9]     → NIR
+     * Driver mapping:
+     *   SMUX F1F4_Clear_NIR: CH0..CH5 -> F1,F2,F3,F4,Clear,NIR
+     *                        stored in spectrum.ch[0..5]
+     *   SMUX F5F8_Clear_NIR: CH0..CH5 -> F5,F6,F7,F8,Clear,NIR
+     *                        stored in spectrum.ch[6..11]
      */
-    uint32_t F1    = spectrum->ch[0];
-    uint32_t F2    = spectrum->ch[1];
-    uint32_t F3    = spectrum->ch[2];
-    uint32_t F4    = spectrum->ch[3];
-    uint32_t F5    = spectrum->ch[4];
-    uint32_t F6    = spectrum->ch[5];
-    uint32_t F7    = spectrum->ch[6];
-    uint32_t F8    = spectrum->ch[7];
-    uint32_t CLEAR = spectrum->ch[8];
+    corrected[LIGHT_CH_F1] = light_subtract_dark(spectrum.ch[0], s_dark_counts[LIGHT_CH_F1]);
+    corrected[LIGHT_CH_F2] = light_subtract_dark(spectrum.ch[1], s_dark_counts[LIGHT_CH_F2]);
+    corrected[LIGHT_CH_F3] = light_subtract_dark(spectrum.ch[2], s_dark_counts[LIGHT_CH_F3]);
+    corrected[LIGHT_CH_F4] = light_subtract_dark(spectrum.ch[3], s_dark_counts[LIGHT_CH_F4]);
+    corrected[LIGHT_CH_F5] = light_subtract_dark(spectrum.ch[6], s_dark_counts[LIGHT_CH_F5]);
+    corrected[LIGHT_CH_F6] = light_subtract_dark(spectrum.ch[7], s_dark_counts[LIGHT_CH_F6]);
+    corrected[LIGHT_CH_F7] = light_subtract_dark(spectrum.ch[8], s_dark_counts[LIGHT_CH_F7]);
+    corrected[LIGHT_CH_F8] = light_subtract_dark(spectrum.ch[9], s_dark_counts[LIGHT_CH_F8]);
 
-    uint32_t sum_all = F1 + F2 + F3 + F4 + F5 + F6 + F7 + F8;
-    if (sum_all == 0U) {
-        /* Dark / no light: keep latest accumulators, zero instantaneous values. */
-        s_blueIndex = 0U;
-        s_blueFrac_q15 = 0U;
-        s_uvRisk = 0U;
-        s_blueWeightedIll = 0U;
+    corrected[LIGHT_CH_NIR] =
+        (uint16_t)(((uint32_t)light_subtract_dark(spectrum.ch[5], s_dark_counts[LIGHT_CH_NIR]) +
+                    (uint32_t)light_subtract_dark(spectrum.ch[11], s_dark_counts[LIGHT_CH_NIR]) +
+                    1U) / 2U);
+
+    corrected[LIGHT_CH_CLEAR] =
+        (uint16_t)(((uint32_t)light_subtract_dark(spectrum.ch[4], s_dark_counts[LIGHT_CH_CLEAR]) +
+                    (uint32_t)light_subtract_dark(spectrum.ch[10], s_dark_counts[LIGHT_CH_CLEAR]) +
+                    1U) / 2U);
+
+    if (light_accumulate_sample(corrected) != 0U)
+    {
+        s_last_sample_ms = now_ms;
+    }
+}
+
+void LightMetrics_StopSession(uint32_t stop_ms)
+{
+    s_session_active = 0U;
+    s_pending_samples = 0U;
+    s_session_stop_ms = stop_ms;
+}
+
+void LightMetrics_FinalizeSession(LightSensorResultRecord *result)
+{
+    uint32_t mean[LIGHT_CHANNEL_COUNT];
+    uint32_t max_mean = 0U;
+
+    if (result == NULL)
+    {
         return;
     }
 
-    /* --- BlueIndex = F3 + F4 --------------------------------------------- */
-    uint32_t blueIndex32 = F3 + F4;
-    if (blueIndex32 > 0xFFFFUL) {
-        s_blueIndex = 0xFFFFU;
-    } else {
-        s_blueIndex = (uint16_t)blueIndex32;
-    }
+    memset(result, 0, sizeof(*result));
+    result->format_version = AS7341_LIGHT_RECORD_FORMAT_VERSION;
+    result->sample_count = s_sample_count;
+    result->session_start_ms = s_session_start_ms;
+    result->acquisition_duration_ms = (uint32_t)(s_session_stop_ms - s_session_start_ms);
 
-    /* --- BlueFrac (Q15) = (F3+F4) / sum(F1..F8) --------------------------- */
-    s_blueFrac_q15 = (uint16_t)((blueIndex32 * 32767UL) / sum_all);
+    light_compute_means(mean);
+    result->clear_mean_counts = mean[LIGHT_CH_CLEAR];
+    result->light_level_class = (uint8_t)AS7341_ClassifyAmbientLight(mean[LIGHT_CH_CLEAR]);
 
-    /* --- Blue-weighted illuminance = (F3+F4) * CLEAR ---------------------- */
-    s_blueWeightedIll = blueIndex32 * CLEAR;  /* 32-bit, application responsible for scaling */
-
-    /* --- UV_risk ≈ (F1+F2+F3)/sum(F1..F8) * CLEAR ------------------------- */
-    uint32_t shortSum = F1 + F2 + F3;
-    s_uvRisk = (shortSum * CLEAR) / sum_all;
-
-    /* --- Accumulate doses (rectangle rule, 1 unit per light sample @ 10 Hz) */
-    s_uvDoseAccum       += (uint64_t)s_uvRisk;
-    s_blueExposureAccum += (uint64_t)s_blueWeightedIll;
-
-    /* --- Classify light type from mains flicker --------------------------- */
-    uint8_t is_artificial = (mains_hz == 50U) || (mains_hz == 60U);
-
-    if (is_artificial) {
-        s_blueExposureArtificialAccum += (uint64_t)s_blueWeightedIll;
-    } else {
-        /* Treat non-flickering samples as likely natural/daylight or DC LED. */
-        s_blueExposureNaturalAccum += (uint64_t)s_blueWeightedIll;
-    }
-
-    /* --- Circadian dose: only inside [20:00, 24:00) ----------------------- */
-    uint32_t seconds_of_day = ((uint32_t)timestamp->hh * 3600U)
-                            + ((uint32_t)timestamp->mm * 60U)
-                            + (uint32_t)timestamp->ss;
-    uint32_t start_s = LM_CIRCADIAN_START_H * 3600U;
-    uint32_t end_s   = LM_CIRCADIAN_END_H * 3600U;
-
-    if (seconds_of_day >= start_s && seconds_of_day < end_s) {
-        /* For circadian disruption we care most about artificial sources. */
-        if (is_artificial) {
-            s_circadianDoseAccum += (uint64_t)s_blueWeightedIll;
+    for (uint8_t i = 0U; i < LIGHT_SIGNATURE_CHANNEL_COUNT; i++)
+    {
+        if (mean[i] > max_mean)
+        {
+            max_mean = mean[i];
         }
     }
+
+    if (max_mean == 0U)
+    {
+        return;
+    }
+
+    for (uint8_t i = 0U; i < LIGHT_SIGNATURE_CHANNEL_COUNT; i++)
+    {
+        result->normalized[i] =
+            (uint16_t)((((uint64_t)mean[i] * AS7341_NORMALIZATION_SCALE) +
+                        (max_mean / 2U)) /
+                       max_mean);
+    }
 }
 
-/* --- Getters ------------------------------------------------------------- */
-
-uint16_t LightMetrics_GetBlueIndex(void)
+void LightMetrics_ResetSession(void)
 {
-    return s_blueIndex;
+    memset(s_sum, 0, sizeof(s_sum));
+    s_sample_count = 0U;
+    s_session_start_ms = 0U;
+    s_session_stop_ms = 0U;
+    s_last_sample_ms = 0U;
+    s_error_count = 0U;
+    s_overflow_drop_count = 0U;
+    s_session_active = 0U;
+    s_pending_samples = 0U;
 }
 
-uint16_t LightMetrics_GetBlueFracQ15(void)
+uint8_t LightMetrics_HasPendingSample(void)
 {
-    return s_blueFrac_q15;
+    return s_pending_samples;
 }
 
-uint32_t LightMetrics_GetUvRisk(void)
+uint8_t LightMetrics_IsSessionActive(void)
 {
-    return s_uvRisk;
+    return s_session_active;
 }
 
-uint32_t LightMetrics_GetBlueWeightedIlluminance(void)
+uint32_t LightMetrics_GetLastErrorCount(void)
 {
-    return s_blueWeightedIll;
+    return s_error_count;
 }
 
-uint64_t LightMetrics_GetUvDoseAccum(void)
+uint32_t LightMetrics_GetOverflowDropCount(void)
 {
-    return s_uvDoseAccum;
+    return s_overflow_drop_count;
 }
 
-uint64_t LightMetrics_GetBlueExposureAccum(void)
+LightLevelClass AS7341_ClassifyAmbientLight(uint32_t clear_mean_counts)
 {
-    return s_blueExposureAccum;
-}
+    if (clear_mean_counts < LIGHT_THRESHOLD_DARK_TO_LOW)
+    {
+        return LIGHT_LEVEL_DARK;
+    }
+    if (clear_mean_counts < LIGHT_THRESHOLD_LOW_TO_NORMAL)
+    {
+        return LIGHT_LEVEL_LOW;
+    }
+    if (clear_mean_counts < LIGHT_THRESHOLD_NORMAL_TO_BRIGHT)
+    {
+        return LIGHT_LEVEL_NORMAL_INDOOR;
+    }
+    if (clear_mean_counts < LIGHT_THRESHOLD_BRIGHT_TO_OUTDOOR)
+    {
+        return LIGHT_LEVEL_BRIGHT;
+    }
+    if (clear_mean_counts < LIGHT_THRESHOLD_OUTDOOR_TO_SUN)
+    {
+        return LIGHT_LEVEL_OUTDOOR;
+    }
 
-uint64_t LightMetrics_GetBlueExposureArtificialAccum(void)
-{
-    return s_blueExposureArtificialAccum;
-}
-
-uint64_t LightMetrics_GetBlueExposureNaturalAccum(void)
-{
-    return s_blueExposureNaturalAccum;
-}
-
-uint64_t LightMetrics_GetCircadianDoseAccum(void)
-{
-    return s_circadianDoseAccum;
+    return LIGHT_LEVEL_DIRECT_SUN;
 }

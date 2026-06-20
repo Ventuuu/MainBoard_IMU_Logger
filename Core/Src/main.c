@@ -8,10 +8,9 @@
   *                   and the AS7341 spectral light sensor.
   * @details        : The application operates using a State Machine triggered by a
   * single USER BUTTON. It performs three primary tasks:
-  * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data from the LSM6DSO16IS
-  *    via I2C at 100 Hz (TIM2), and Clear/NIR channels plus full spectral
-  *    filters and mains flicker classification from the AS7341 at ~10 Hz
-  *    (every 10th timer tick) on the same I2C bus (hi2c3).
+ * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data from the LSM6DSO16IS
+ *    via I2C at 100 Hz (TIM2), and computes a final AS7341 session-level
+ *    light result outside interrupt context.
   * 2. Wireless Transmission: Sends data packets via Bluetooth Low Energy (BLE)
   *    using the UART interface.
   * 3. Data Logging: Saves acquired data to NAND Flash memory.
@@ -50,9 +49,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
-/* Light sensor is sampled every LIGHT_SUBSAMPLE IMU ticks (100 Hz / 10 = 10 Hz) */
-#define LIGHT_SUBSAMPLE  10U
 
 /* USER CODE END PD */
 
@@ -96,6 +92,7 @@ volatile uint8_t usb_flag = 0U;
 static volatile uint8_t start_acquisition_requested = 0U;
 static volatile uint8_t stop_acquisition_requested = 0U;
 static volatile uint32_t sensor_tick_pending = 0U;
+static volatile uint8_t light_finalize_pending = 0U;
 
 // --- IMU data ---
 static IMU_Data accelerometer_data;
@@ -104,19 +101,13 @@ static IMU_Data gyroscope_data;
 uint8_t raw_accelerometer[6] = {0};
 uint8_t raw_gyroscope[6]     = {0};
 
-// --- Light sensor data ---
-static AS7341_Data light_data;
-static AS7341_Spectrum spectrum;        /* full spectral frame */
-
 /*
  * raw_light layout (22 bytes):
- *   [0..15]  8 spectral filters F1..F8 (uint16 each, little-endian)
- *   [16..17] Clear channel   (uint16, little-endian)
- *   [18..19] NIR   channel   (uint16, little-endian)
- *   [20..21] Mains freq (uint16, little-endian: 0, 50 or 60 Hz equivalent)
+ *   Legacy AS7341 area in the 40-byte IMU record. The new light pipeline keeps
+ *   this area zero-filled and writes one final LOG_MAGIC_LIGHT page instead.
  */
 uint8_t raw_light[22] = {0};
-static uint8_t light_tick = 0; /* subsample counter */
+static LightSensorResultRecord light_result;
 
 /// ----- NAND FLASH variables ----- ///
 
@@ -177,6 +168,8 @@ void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 /* USER CODE END 0 */
 static void StopAcquisition(void)
 {
+    uint32_t stop_ms = HAL_GetTick();
+
     HAL_TIM_Base_Stop_IT(&htim2);
 
     if (microphone_active)
@@ -188,11 +181,12 @@ static void StopAcquisition(void)
     audio_buffer_ready = 0U;
     sensor_tick_pending = 0U;
     stop_acquisition_requested = 0U;
+    LightMetrics_StopSession(stop_ms);
+    light_finalize_pending = 1U;
 
     current_state = STATE_IDLE;
 
     LED_Off(LED_GREEN);
-    LED_On(LED_BLUE);
 }
 
 static void ProcessSensorTick(void)
@@ -201,40 +195,7 @@ static void ProcessSensorTick(void)
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
     IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
 
-    /* --- Read light sensor every LIGHT_SUBSAMPLE ticks --- */
-    light_tick++;
-
-    if (light_tick >= LIGHT_SUBSAMPLE)
-    {
-        light_tick = 0U;
-
-        if (AS7341_ReadFullSpectrum(&spectrum))
-        {
-            for (uint8_t i = 0U; i < 8U; i++)
-            {
-                uint16_t v = spectrum.ch[i];
-
-                raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
-                raw_light[2U * i + 1U] = (uint8_t)(v >> 8U);
-            }
-
-            uint16_t clear = spectrum.ch[8];
-            uint16_t nir   = spectrum.ch[9];
-
-            raw_light[16] = (uint8_t)(clear & 0xFFU);
-            raw_light[17] = (uint8_t)(clear >> 8U);
-
-            raw_light[18] = (uint8_t)(nir & 0xFFU);
-            raw_light[19] = (uint8_t)(nir >> 8U);
-        }
-
-        uint16_t mains_hz = AS7341_DetectMainsHz();
-
-        raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
-        raw_light[21] = (uint8_t)(mains_hz >> 8U);
-
-        LightMetrics_Update(&spectrum, &timestamp, mains_hz);
-    }
+    LightMetrics_RequestSample();
 
     /* --- BLE transmission --- */
     BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
@@ -351,8 +312,8 @@ MX_SPI3_Init();
     }
   }
 
-  /* Reset MCU-side light exposure metrics accumulators. */
-  LightMetrics_Reset();
+  /* Configure AS7341 timing/gain and reset session accumulators. */
+  LightMetrics_Init();
 
   LED_Off(LED_RED);
 
@@ -373,21 +334,25 @@ MX_SPI3_Init();
 	  {
       case STATE_IDLE:
 
-<<<<<<< HEAD
+        if (light_finalize_pending)
+        {
+          light_finalize_pending = 0U;
+          LightMetrics_FinalizeSession(&light_result);
+
+          if (NANDLogger_AppendLightResult(&nand_logger,
+                                           &light_result,
+                                           HAL_GetTick()) != LOG_OK)
+          {
+            LED_On(LED_RED);
+          }
+
+          LightMetrics_ResetSession();
+        }
+
         if (start_acquisition_requested)
         {
           start_acquisition_requested = 0U;
 
-          LED_Off(LED_BLUE);
-=======
-          if (!usb_flag)
-          {
-          /* existing idle behavior */
-        }
-        else
-        {
-          current_state = STATE_USB_CONNECTED;
->>>>>>> dface4cf84a25cc89c78a18d1f415275a81ae3d2
           LED_On(LED_GREEN);
 
           if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
@@ -400,8 +365,9 @@ MX_SPI3_Init();
           timestamp.sss = 0U;
 
           tim = 0U;
-          light_tick = 0U;
           sensor_tick_pending = 0U;
+          memset(raw_light, 0, sizeof(raw_light));
+          LightMetrics_StartSession(HAL_GetTick());
 
           audio_buffer_ready = 0U;
           microphone_active = 0U;
@@ -426,13 +392,11 @@ MX_SPI3_Init();
         {
           current_state = STATE_USB_CONNECTED;
 
-          LED_Off(LED_BLUE);
           LED_On(LED_GREEN);
         }
         else
         {
           LED_Off(LED_GREEN);
-          LED_On(LED_BLUE);
         }
 
         break;
@@ -452,6 +416,12 @@ MX_SPI3_Init();
           {
             sensor_tick_pending--;
              ProcessSensorTick();
+          }
+
+          if ((current_state == STATE_ACQUISITION) &&
+              (stop_acquisition_requested == 0U))
+          {
+            LightMetrics_ProcessPendingSample();
           }
 
           if (stop_acquisition_requested)
@@ -506,13 +476,10 @@ MX_SPI3_Init();
 
 /* USER CODE BEGIN 4 */
 /**
-  * @brief  TIM2 period elapsed callback — 100 Hz IMU + 10 Hz light sensor.
+  * @brief  TIM2 period elapsed callback — 100 Hz sensor scheduler.
   *
-  * The IMU is read on every tick (100 Hz).
-  * The AS7341 is read every LIGHT_SUBSAMPLE ticks (10 Hz) because its
-  * integration time (~18 ms) is longer than one IMU tick (10 ms).
-  * Between light reads, the previous raw_light[] value is reused in the
-  * NAND packet so every record is the same fixed size (BYTES_PER_SAMPLE).
+  * Interrupt context only queues work. IMU reads, AS7341 I2C accesses,
+  * processing, NAND writes and USB transfers are handled in the main loop.
   */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {

@@ -7,6 +7,7 @@
  * - One sequential NAND logger for all data types.
  * - Sensor pages are marked with LOG_MAGIC_SENSOR = 'SENS'.
  * - Audio pages are marked with LOG_MAGIC_AUDIO  = 'AUD0'.
+ * - Light result pages are marked with LOG_MAGIC_LIGHT = 'LITE'.
  *
  * Page format:
  *
@@ -18,10 +19,14 @@
  *  - 102 records/page
  *  - 40 bytes/record
  *  - 4080 bytes total payload
+ *  - legacy light bytes are reserved for compatibility
  *
  * Audio page payload:
  *  - int16_t PCM samples
  *  - AUDIO_BUFFER_SIZE = 1024 samples -> 2048 bytes
+ *
+ * Light page payload:
+ *  - one 40-byte little-endian LightSensorResultRecord.
  */
 
 #include "string.h"
@@ -31,11 +36,14 @@
 #include "SPI.h"
 #include "SPI_NAND.h"
 #include "Memory_operations.h"
+#include "as7341_processing_config.h"
 #include "usbd_cdc_if.h"
 
 #include "led_driver.h"
 
 
+_Static_assert(sizeof(LogPageHeader) == LOG_HEADER_SIZE_BYTES,
+               "LogPageHeader size must remain 16 bytes");
 
 uint8_t audio_NAND_packet[4096] = {0};
 uint8_t audio_pagina_scritta = 0;
@@ -98,6 +106,7 @@ extern uint16_t bad_blocks[2048];
  * Avoid allocating 4096 bytes on the stack.
  */
 static uint8_t logger_audio_page_buffer[NAND_PAGE_SIZE_BYTES];
+static uint8_t logger_light_page_buffer[NAND_PAGE_SIZE_BYTES];
 
 /*
  * Static page buffer for download.
@@ -139,6 +148,46 @@ static void logger_prepare_header(uint8_t *page,
     header.timestamp_ms = timestamp_ms;
 
     memcpy(page, &header, sizeof(LogPageHeader));
+}
+
+static void logger_put_u16_le(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)(value & 0xFFU);
+    dst[1] = (uint8_t)((value >> 8U) & 0xFFU);
+}
+
+static void logger_put_u32_le(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value & 0xFFU);
+    dst[1] = (uint8_t)((value >> 8U) & 0xFFU);
+    dst[2] = (uint8_t)((value >> 16U) & 0xFFU);
+    dst[3] = (uint8_t)((value >> 24U) & 0xFFU);
+}
+
+static void logger_serialize_light_result(uint8_t *dst,
+                                          const LightSensorResultRecord *result)
+{
+    if ((dst == NULL) || (result == NULL))
+    {
+        return;
+    }
+
+    /* Explicit little-endian layout, independent from struct padding. */
+    logger_put_u16_le(&dst[0], result->format_version);
+
+    for (uint8_t i = 0U; i < 9U; i++)
+    {
+        logger_put_u16_le(&dst[2U + (2U * i)], result->normalized[i]);
+    }
+
+    logger_put_u32_le(&dst[20], result->clear_mean_counts);
+    logger_put_u32_le(&dst[24], result->sample_count);
+    logger_put_u32_le(&dst[28], result->acquisition_duration_ms);
+    logger_put_u32_le(&dst[32], result->session_start_ms);
+    dst[36] = result->light_level_class;
+    dst[37] = 0U;
+    dst[38] = 0U;
+    dst[39] = 0U;
 }
 
 
@@ -436,6 +485,43 @@ LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
                 logger_audio_page_buffer);   
             }
 
+LogStatus NANDLogger_AppendLightResult(NandLogger *logger,
+                                       const LightSensorResultRecord *result,
+                                       uint32_t timestamp_ms)
+{
+    LogStatus status;
+
+    if ((logger == NULL) || (result == NULL))
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    if (logger->current_good_block_index >= logger->good_block_count)
+    {
+        return LOG_ERR_FULL;
+    }
+
+    status = logger_flush_sensor_page(logger, timestamp_ms);
+    if (status != LOG_OK)
+    {
+        return status;
+    }
+
+    memset(logger_light_page_buffer, 0xFF, sizeof(logger_light_page_buffer));
+
+    logger_prepare_header(logger_light_page_buffer,
+                          LOG_MAGIC_LIGHT,
+                          AS7341_LIGHT_RESULT_RECORD_BYTES,
+                          logger->page_sequence,
+                          timestamp_ms);
+
+    logger_serialize_light_result(&logger_light_page_buffer[LOG_HEADER_SIZE_BYTES],
+                                  result);
+
+    return logger_write_current_page(logger,
+                                     logger_light_page_buffer);
+}
+
 LogStatus NANDLogger_Flush(NandLogger *logger, uint32_t timestamp_ms)
 {
     return logger_flush_sensor_page(logger, timestamp_ms);
@@ -689,10 +775,7 @@ void erase_good_blocks(uint8_t *bad_blocks_flag)
  * [3..4]   sss, uint16 little-endian
  * [5..10]  accelerometer raw bytes
  * [11..16] gyroscope raw bytes
- * [17..32] light F1..F8, 16 bytes
- * [33..34] Clear
- * [35..36] NIR
- * [37..38] mains flicker
+ * [17..38] reserved light area, zero-filled by the new AS7341 pipeline
  * [39]     reserved
  */
 void write_packet(uint16_t sample_index,
@@ -738,21 +821,11 @@ void write_packet(uint16_t sample_index,
     packet_buffer[base + 15U] = gyroscope[4];
     packet_buffer[base + 16U] = gyroscope[5];
 
-    /* Light spectral filters F1..F8, 16 bytes */
-    for (uint8_t i = 0U; i < 16U; i++)
+    /* Legacy light area kept for 40-byte record compatibility. */
+    for (uint8_t i = 0U; i < 22U; i++)
     {
         packet_buffer[base + 17U + i] = light_raw[i];
     }
-
-    /* Clear and NIR */
-    packet_buffer[base + 33U] = light_raw[16];  /* Clear LSB */
-    packet_buffer[base + 34U] = light_raw[17];  /* Clear MSB */
-    packet_buffer[base + 35U] = light_raw[18];  /* NIR LSB   */
-    packet_buffer[base + 36U] = light_raw[19];  /* NIR MSB   */
-
-    /* Mains flicker */
-    packet_buffer[base + 37U] = light_raw[20];
-    packet_buffer[base + 38U] = light_raw[21];
 
     /* Reserved byte */
     packet_buffer[base + 39U] = 0x00U;
