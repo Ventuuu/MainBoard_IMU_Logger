@@ -75,8 +75,6 @@ UART_HandleTypeDef huart3;
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 
-// Local Puffer for converted UART-data (half of the size)
-int16_t UartTxBuffer[AUDIO_REC_BUFF_SIZE / 2];
 /* USER CODE BEGIN PV */
 
 // --- State Machine ---
@@ -221,9 +219,10 @@ int main(void)
   // start Microphone-recording 
   //if (PDM_Microphone_Start(&MdfHandle0) != HAL_OK) {
     if (PDM_Microphone_Start(&MdfHandle0, &huart3, &Dma_config) != HAL_OK){
-      LED_On(LED_RED);
       Error_Handler();
     }
+    LED_On(LED_RED);
+    
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -453,7 +452,9 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.Trigger.Source = MDF_CLOCK_TRIG_TRGO;
   MdfFilterConfig0.Trigger.Edge = MDF_FILTER_TRIG_RISING_EDGE;
   
-  Dma_config.Address = (uint32_t)MIC_BUFFER;
+  //DMA configs
+  int32_t buffer[FULL_BUFFER_SIZE];
+  Dma_config.Address = (uint32_t)&buffer;
   Dma_config.DataLength = 1 * sizeof(uint32_t);
   Dma_config.MsbOnly = 0;
 

@@ -3,8 +3,8 @@
 
 #include "main.h" // Ermöglicht den Zugriff auf alle HAL-Typen (inkl. MDF und UART)
 
-#define AUDIO_REC_BUFF_SIZE 1024
-#define MIC_BUFFER     0x34 // mic memory address
+#define HALF_BUFFER_SIZE 512
+#define FULL_BUFFER_SIZE (HALF_BUFFER_SIZE*2)
 // --- Funktionen für die main.c ---
 
 /**

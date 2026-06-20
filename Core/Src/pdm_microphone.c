@@ -1,20 +1,21 @@
 #include "pdm_microphone.h"
 #include "main.h"
+#include <stdint.h>
 
 // Interne Variablen des Treibers (statisch)
 //static MDF_HandleTypeDef MdfHandle0;
 //static MDF_FilterConfigTypeDef MdfFilterConfig0;
-const static int16_t AudioRecBuffer[AUDIO_REC_BUFF_SIZE];
-static int16_t UartTxBuffer[AUDIO_REC_BUFF_SIZE / 2];
+const static int32_t AudioRecBuffer[FULL_BUFFER_SIZE];
+static int32_t UartTxBuffer[HALF_BUFFER_SIZE];
 static UART_HandleTypeDef *p_huart_instance = NULL; // Speichert das UART-Handle für die Callbacks
 
 // Lokale Hilfsfunktion zur Datenkonvertierung und Übertragung
 static void PDM_Microphone_ProcessAndSend(uint8_t half)
 {
-    uint32_t startIndex = (half == 0) ? 0 : (AUDIO_REC_BUFF_SIZE / 2);
+    uint32_t startIndex = (half == 0) ? 0 : (HALF_BUFFER_SIZE);
     
     // Konvertierung von 32-Bit auf 16-Bit (Bitshift für korrekte Ausrichtung)
-    for (int i = 0; i < (AUDIO_REC_BUFF_SIZE / 2); i++)
+    for (int i = 0; i < (HALF_BUFFER_SIZE); i++)
     {
         UartTxBuffer[i] = (int16_t)(AudioRecBuffer[startIndex + i] >> 8);
     }
@@ -22,7 +23,7 @@ static void PDM_Microphone_ProcessAndSend(uint8_t half)
     // Übertragung via UART-DMA, sofern ein gültiges Handle registriert ist
     if (p_huart_instance != NULL)
     {
-        HAL_UART_Transmit_DMA(p_huart_instance, (uint8_t*)UartTxBuffer, (AUDIO_REC_BUFF_SIZE / 2) * 2);
+        HAL_UART_Transmit_DMA(p_huart_instance, (uint8_t*)UartTxBuffer, (HALF_BUFFER_SIZE) * 2);
     }
 }
 
