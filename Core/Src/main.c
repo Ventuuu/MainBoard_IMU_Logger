@@ -150,7 +150,7 @@ static void MX_I2C3_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_MDF1_Init(void);
-//static void MX_TIM2_Init(void);
+static void MX_TIM2_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
 
@@ -169,14 +169,14 @@ static void MX_SPI3_Init(void);
  * Duration target: < 1 µs  (verified: 2 instructions + return)
  * ============================================================ */
 /* USER CODE BEGIN 0 */
-// void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) -> no longer needed since we're using the timer purely as a tripwire to set a flag, and not for any timing-sensitive operations. The main loop can check the flag and perform the necessary I2C reads and processing without being constrained by the ISR execution time.
-// {
-//     if (htim != &htim2) return;
-//     if (current_state != STATE_ACQUISITION) return;
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) //-> no longer needed since we're using the timer purely as a tripwire to set a flag, and not for any timing-sensitive operations. The main loop can check the flag and perform the necessary I2C reads and processing without being constrained by the ISR execution time.
+{
+    if (htim != &htim2) return;
+    if (current_state != STATE_ACQUISITION) return;
 
-//     g_imu_fetch_flag = 1U;
-//     g_light_tick++;
-// }
+    g_imu_fetch_flag = 1U;
+    g_light_tick++;
+}
 /* USER CODE END 0 */
 
 /**
@@ -196,7 +196,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_MDF1_Init();
-  // MX_TIM2_Init();
+  MX_TIM2_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
 
@@ -238,18 +238,16 @@ int main(void)
    */
   HAL_NVIC_SetPriority(USART3_IRQn,  5, 0);
   HAL_NVIC_SetPriority(OTG_FS_IRQn,  5, 0);
-  // HAL_NVIC_SetPriority(TIM2_IRQn,    6, 0); no longer using TIM2
-  HAL_NVIC_SetPriority(EXTI0_IRQn,   6, 0);
-  HAL_NVIC_SetPriority(EXTI4_IRQn,   6, 0);
-  HAL_NVIC_SetPriority(EXTI5_IRQn,   6, 0);
-  HAL_NVIC_SetPriority(EXTI10_IRQn,  6, 0);
-  HAL_NVIC_SetPriority(EXTI13_IRQn,  6, 0);
+  HAL_NVIC_SetPriority(TIM2_IRQn,    6, 0); //no longer using TIM2
+  // HAL_NVIC_SetPriority(EXTI0_IRQn,   6, 0);
+  // HAL_NVIC_SetPriority(EXTI4_IRQn,   6, 0);
+  // HAL_NVIC_SetPriority(EXTI5_IRQn,   6, 0);
+  // HAL_NVIC_SetPriority(EXTI10_IRQn,  6, 0);
+  // HAL_NVIC_SetPriority(EXTI13_IRQn,  6, 0);
 
-  HAL_NVIC_EnableIRQ(EXTI13_IRQn); 
+  // HAL_NVIC_EnableIRQ(EXTI13_IRQn); 
 
-  // HAL_TIM_Base_Start_IT(&htim2); no longer using TIM2 to poll the sensor, leaving it running wastes power and CPU cycles.
-  
-  // HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, (uint8_t *)audio_buffer, AUDIO_BUFFER_SIZE); for audio
+  HAL_TIM_Base_Start_IT (&htim2);
 
   LED_Off(LED_RED);
   /* USER CODE END 2 */
@@ -289,11 +287,11 @@ int main(void)
          * TASK 1: The IMU Fetch (Hardware Driven - 100Hz)
          * ============================================================== */
         uint8_t do_fetch = 0;
-        uint32_t primask = __get_PRIMASK();
-        __disable_irq();
+        // uint32_t primask = __get_PRIMASK();
+        // __disable_irq();
         do_fetch = g_imu_fetch_flag;
         g_imu_fetch_flag = 0U;
-        if (!primask) __enable_irq();
+        // if (!primask) __enable_irq();
 
         if (do_fetch)
         {
@@ -346,7 +344,7 @@ int main(void)
             dma_config.MsbOnly    = DISABLE; // Keep full 16-bit resolution
             
             // Start the DMA capture in the background using the struct
-            HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
+            // HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
         }
 
         /* ==============================================================
@@ -359,7 +357,7 @@ int main(void)
             float noise_dbfs  = MicMetrics_CalculateNoise_dBFS(g_audio_buffer, AUDIO_CHUNK_SIZE);
             
             // Turn off the peripheral to save battery
-            HAL_MDF_AcqStop_DMA(&MdfHandle0);
+            // HAL_MDF_AcqStop_DMA(&MdfHandle0);
             
             g_last_noise_dbfs  = (int8_t)noise_dbfs;
             g_last_noise_dbspl = (uint8_t)noise_dbspl;
@@ -638,23 +636,23 @@ static void MX_SPI3_Init(void)
   if (HAL_SPIEx_SetConfigAutonomousMode(&hspi3, &cfg) != HAL_OK) Error_Handler();
 }
 
-// static void MX_TIM2_Init(void)
-// {
-//   TIM_ClockConfigTypeDef  sClockSourceConfig = {0};
-//   TIM_MasterConfigTypeDef sMasterConfig      = {0};
-//   htim2.Instance               = TIM2;
-//   htim2.Init.Prescaler         = 7200 - 1;
-//   htim2.Init.CounterMode       = TIM_COUNTERMODE_UP;
-//   htim2.Init.Period            = 99;
-//   htim2.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
-//   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-//   if (HAL_TIM_Base_Init(&htim2) != HAL_OK) Error_Handler();
-//   sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-//   if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK) Error_Handler();
-//   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-//   sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
-//   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK) Error_Handler();
-// }
+static void MX_TIM2_Init(void)
+{
+  TIM_ClockConfigTypeDef  sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig      = {0};
+  htim2.Instance               = TIM2;
+  htim2.Init.Prescaler         = 7200 - 1;
+  htim2.Init.CounterMode       = TIM_COUNTERMODE_UP;
+  htim2.Init.Period            = 99;
+  htim2.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK) Error_Handler();
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK) Error_Handler();
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK) Error_Handler();
+}
 
 static void MX_USART3_UART_Init(void)
 {
@@ -744,37 +742,37 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  // --- 1. Handle the IMU 100Hz Interrupt ---
-  if (GPIO_Pin == IMU_IS_INT1_Pin) 
-  {
-      // Just set the flag and exit. Do not put I2C reads here!
-      g_imu_fetch_flag = 1U;
-      g_light_tick++;
-  }
+// void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+// {
+//   // --- 1. Handle the IMU 100Hz Interrupt ---
+//   if (GPIO_Pin == IMU_IS_INT1_Pin) 
+//   {
+//       // Just set the flag and exit. Do not put I2C reads here!
+//       g_imu_fetch_flag = 1U;
+//       g_light_tick++;
+//   }
 
-  // --- 2. Handle the User Button ---
-  if (GPIO_Pin == USER_BUTTON_Pin)
-  {
-    switch (current_state)
-    {
-      case STATE_IDLE:
-        current_state = STATE_ACQUISITION;
-        LED_On(LED_GREEN);
-        break;
-      case STATE_ACQUISITION:
-        current_state = STATE_IDLE;
-        LED_Off(LED_GREEN);
-        break;
-      case STATE_USB_CONNECTED:
-        current_state = STATE_DOWNLOAD;
-        break;
-      default:
-        break;
-    }
-  }
-}
+//   // --- 2. Handle the User Button ---
+//   if (GPIO_Pin == USER_BUTTON_Pin)
+//   {
+//     switch (current_state)
+//     {
+//       case STATE_IDLE:
+//         current_state = STATE_ACQUISITION;
+//         LED_On(LED_GREEN);
+//         break;
+//       case STATE_ACQUISITION:
+//         current_state = STATE_IDLE;
+//         LED_Off(LED_GREEN);
+//         break;
+//       case STATE_USB_CONNECTED:
+//         current_state = STATE_DOWNLOAD;
+//         break;
+//       default:
+//         break;
+//     }
+//   }
+// }
 /* USER CODE END 4 */
 
 void Error_Handler(void)
