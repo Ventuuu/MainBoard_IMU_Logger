@@ -52,7 +52,7 @@ void BLE_Initialize(void) {
     BLE_SendData(reboot_command, sizeof(reboot_command) - 1);
     HAL_Delay(100);
 
-    exit_command_mode();
+    //exit_command_mode();
 }
 
 /**

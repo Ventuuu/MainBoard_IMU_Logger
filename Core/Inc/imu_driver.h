@@ -23,6 +23,9 @@
 #define IMU_WHO_AM_I_REG        0x0F
 #define IMU_WHO_AM_I_VALUE      0x22
 
+// Interrupt REGISTER:
+#define IMU_INT1_CTRL_REG       0x0D // INT1 pin control register
+
 // Accelerometer and Gyroscope Control Registers
 #define IMU_ACC_CTRL1_REG       0x10 // ODR and FS selection for accelerometer
 #define IMU_GYR_CTRL2_REG       0x11 // ODR and FS selection for gyroscope

@@ -61,6 +61,7 @@
 #include "bluetooth.h"
 #include "as7341_driver.h"
 #include "light_metrics_mcu.h"
+#include "mic_metrics.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,6 +74,16 @@
 #define LIGHT_SUBSAMPLE           10U
 /** Interval (ms) between mains flicker classification updates */
 #define FLICKER_UPDATE_PERIOD_MS  2000U
+
+/* --- Intermittent Audio Variables --- */
+#define AUDIO_CHUNK_SIZE 1024
+int16_t g_audio_buffer[AUDIO_CHUNK_SIZE] = {0}; 
+
+volatile uint8_t g_audio_ready_flag = 0U;
+static uint32_t last_audio_check_ms = 0U;
+static int8_t  g_last_noise_dbfs  = -100; // Default to absolute silence
+static uint8_t g_last_noise_dbspl = 0;    // Default to 0 SPL
+
 /* USER CODE END PD */
 
 /* Private variables ---------------------------------------------------------*/
@@ -88,7 +99,7 @@ PCD_HandleTypeDef   hpcd_USB_OTG_FS;
 /* USER CODE BEGIN PV */
 
 /* --- State machine -------------------------------------------------------- */
-AppState current_state = STATE_IDLE;
+AppState current_state = STATE_ACQUISITION;
 
 /* --- Global flags --------------------------------------------------------- */
 uint8_t usb_flag = 0;
@@ -239,7 +250,11 @@ int main(void)
   HAL_NVIC_SetPriority(EXTI10_IRQn,  6, 0);
   HAL_NVIC_SetPriority(EXTI13_IRQn,  6, 0);
 
+  HAL_NVIC_EnableIRQ(EXTI13_IRQn); 
+
   // HAL_TIM_Base_Start_IT(&htim2); no longer using TIM2 to poll the sensor, leaving it running wastes power and CPU cycles.
+  
+  // HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, (uint8_t *)audio_buffer, AUDIO_BUFFER_SIZE); for audio
 
   LED_Off(LED_RED);
   /* USER CODE END 2 */
@@ -257,9 +272,9 @@ int main(void)
     static uint32_t last_blink = 0;
     if (HAL_GetTick() - last_blink > 500) {
         last_blink = HAL_GetTick();
-        LED_On(LED_GREEN);
+        LED_Toggle(LED_RED);
     }
-    LED_Off(LED_GREEN);
+    
 
     switch (current_state)
     {
@@ -274,154 +289,138 @@ int main(void)
       /* ------------------------------------------------------------------ */
       case STATE_ACQUISITION:
       {
+        uint32_t current_tick = HAL_GetTick();
+
         /* ==============================================================
-         * 1. FETCH PATH — Triggered by IMU EXTI Data-Ready Pin
+         * TASK 1: The IMU Fetch (Hardware Driven - 100Hz)
          * ============================================================== */
-        uint8_t do_fetch;
+        uint8_t do_fetch = 0;
         uint32_t primask = __get_PRIMASK();
         __disable_irq();
-        do_fetch         = g_imu_fetch_flag;
+        do_fetch = g_imu_fetch_flag;
         g_imu_fetch_flag = 0U;
         if (!primask) __enable_irq();
 
         if (do_fetch)
         {
-            // 1. Read the physical I2C bus ONCE (Raw bytes only!)
             IMU_ReadAccelerometerRaw(raw_accelerometer);
             IMU_ReadGyroscopeRaw(raw_gyroscope);
 
-            // 2. Push to buffer
             IMU_RawData_t raw_sample;
             memcpy(raw_sample.acc,  raw_accelerometer, 6);
             memcpy(raw_sample.gyro, raw_gyroscope,     6);
             IMU_RingBuffer_Push(&g_imu_ring_buffer, &raw_sample);
+            
+            // LED_Toggle(LED_RED); // Keep your debug toggles if you like!
+            // printf("RB IMU s\n");
         }
 
         /* ==============================================================
-         * 2. DRAIN PATH — Empty the entire buffer
+         * TASK 2: The IMU Math (Safely does nothing if IMU is unplugged!)
          * ============================================================== */
         IMU_RawData_t popped;
-        
-        // Loop to drain ALL pending samples from the buffer
         while (IMU_RingBuffer_Pop(&g_imu_ring_buffer, &popped))
         {
-            // 1. Convert raw bytes to float (No I2C calls here!)
             IMU_ConvertAccelRawToFloat(&accelerometer_data, popped.acc);
             IMU_ConvertGyroRawToFloat(&gyroscope_data,     popped.gyro);
-
-            // 2. Update Kinematics (100 Hz)
             ImuMetrics_Update(&accelerometer_data, &gyroscope_data);
 
-            // Transmit the 100Hz raw bytes immediately if Dev Mode is active
-            // ----------------------------------------------------------
-            if (BLE_IsRawModeActive()) 
-            {
+            if (BLE_IsRawModeActive()) {
                 BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, popped.acc);
-                // BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, popped.gyro); 
+                BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, popped.gyro); 
             }
 
-            /* ----------------------------------------------------------
-             * Light sensor — triggered every LIGHT_SUBSAMPLE ticks (10 Hz)
-             * ---------------------------------------------------------- */
-            uint8_t cur_tick = g_light_tick;
-            if ((uint8_t)(cur_tick - g_light_tick_last) >= LIGHT_SUBSAMPLE)
-            {
-                g_light_tick_last = cur_tick;
-
-                AS7341_ReadFullSpectrum(&spectrum);
-
-                // Pack spectral channels into raw_light[22]
-                for (uint8_t i = 0; i < 8; i++) {
-                    raw_light[i * 2]     = (uint8_t)(spectrum.ch[i] & 0xFF);
-                    raw_light[i * 2 + 1] = (uint8_t)(spectrum.ch[i] >> 8);
-                }
-                raw_light[16] = (uint8_t)(spectrum.ch[10] & 0xFF);  
-                raw_light[17] = (uint8_t)(spectrum.ch[10] >> 8);
-                raw_light[18] = (uint8_t)(spectrum.ch[11] & 0xFF);  
-                raw_light[19] = (uint8_t)(spectrum.ch[11] >> 8);
-                raw_light[20] = (uint8_t)(g_mains_hz & 0xFF);
-                raw_light[21] = (uint8_t)(g_mains_hz >> 8);
-
-                // LightMetrics_Update handles the 1-second BLE transmission logic
-                if (LightMetrics_Update(&spectrum, &timestamp, g_mains_hz))
-                {
-                  // ----------------------------------------------------------
-                    // DEVELOPER MODE ROUTING
-                    // ----------------------------------------------------------
-                    // Only build and send the 0x55 packet if we are NOT in Raw Mode
-                    // ----------------------------------------------------------
-                    if (BLE_IsRawModeActive()) 
-                    {
-                        // Raw spectral packets - 8 channels
-                        //BLE_SendRawLightPacket(raw_light);
-                    } 
-                    else 
-                    {  
-                    BLE_UnifiedPayload ble_payload;
-                    ble_payload.stepCount           = (uint16_t)ImuMetrics_GetStepCount();
-                    ble_payload.cadence             = (uint8_t)ImuMetrics_GetCadence();
-                    ble_payload.activityState       = (BLE_ActivityState)ImuMetrics_GetActivityState();
-                    ble_payload.uvRisk              = (uint16_t)LightMetrics_GetUvRisk();
-                    ble_payload.blueLightIntensity  = LightMetrics_GetBlueIndex();
-                    ble_payload.blueLightRatio      = LightMetrics_GetBlueFracQ15();
-                    ble_payload.sunLikeIndex        = LightMetrics_GetSunLikeIndexQ15();
-                    ble_payload.metric1_clear       = spectrum.ch[10];
-                    
-                    BLE_SendUnifiedPacket(&ble_payload);
-
-                    LED_Toggle(LED_RED);    // Blink to indicate a successful BLE transmission
-                    }
-                }
-            }
-
-        /* ==============================================================
-         * 3. NAND FLASH PATH 
-         * ============================================================== */
-          // A. Increment the sequential sample counter
-          sample++;
-          //B. Update the timestamp.
-          timestamp.sss = HAL_GetTick();
-          // RTC_TimeTypeDef sTime; -> to be implemented if we want to use the RTC instead of HAL_GetTick() for timestamping
-          // RTC_DateTypeDef sDate;
-          // HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-          // HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN); // Must call Date after Time to unlock registers
-          // timestamp.hours = sTime.Hours;
-          // timestamp.minutes = sTime.Minutes;
-          // timestamp.seconds = sTime.Seconds;
-
-        write_packet(sample, timestamp, popped.acc, popped.gyro, raw_light, NAND_packet);
-        write_memory();
+            // NAND writing requires sequential IMU data
+            sample++;
+            timestamp.sss = current_tick;
+            // write_packet(sample, timestamp, popped.acc, popped.gyro, raw_light, NAND_packet);
+            // write_memory();
         }
 
-        // Check for Buffer Overflows
+        /* ==============================================================
+         * TASK 3: The 10-Second Microphone Wakeup (Timer Driven)
+         * ============================================================== */
+        if (current_tick - last_audio_check_ms >= 10000) {
+            last_audio_check_ms = current_tick;
+            
+            // Give the MP34DT06J 10ms to stabilize its internal capacitors
+            HAL_Delay(10);
+            
+            // Start the DMA capture in the background
+            HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, (uint8_t *)g_audio_buffer, AUDIO_CHUNK_SIZE);
+        }
+
+        /* ==============================================================
+         * TASK 4: Process the Audio (Fires when DMA finishes 64ms later)
+         * ============================================================== */
+        if (g_audio_ready_flag) {
+            g_audio_ready_flag = 0;
+            
+            float noise_dbspl = MicMetrics_CalculateNoise_dBSPL(g_audio_buffer, AUDIO_CHUNK_SIZE);
+            float noise_dbfs  = MicMetrics_CalculateNoise_dBFS(g_audio_buffer, AUDIO_CHUNK_SIZE);
+            
+            // Turn off the peripheral to save battery!
+            HAL_MDF_AcqStop_DMA(&MdfHandle0);
+            
+            g_last_noise_dbfs  = (int8_t)noise_dbfs;
+            g_last_noise_dbspl = (uint8_t)noise_dbspl;
+        }
+
+        /* ==============================================================
+         * TASK 5: The Light Sensor & BLE Transmission (Timer Driven - 10Hz)
+         * ============================================================== */
+        static uint32_t last_light_read_ms = 0;
+        if (current_tick - last_light_read_ms >= 100) 
+        {
+            last_light_read_ms = current_tick;
+
+            AS7341_ReadFullSpectrum(&spectrum);
+
+            // Pack spectral channels into raw_light[22]
+            for (uint8_t i = 0; i < 8; i++) {
+                raw_light[i * 2]     = (uint8_t)(spectrum.ch[i] & 0xFF);
+                raw_light[i * 2 + 1] = (uint8_t)(spectrum.ch[i] >> 8);
+            }
+            raw_light[16] = (uint8_t)(spectrum.ch[10] & 0xFF);  
+            raw_light[17] = (uint8_t)(spectrum.ch[10] >> 8);
+            raw_light[18] = (uint8_t)(spectrum.ch[11] & 0xFF);  
+            raw_light[19] = (uint8_t)(spectrum.ch[11] >> 8);
+            raw_light[20] = (uint8_t)(g_mains_hz & 0xFF);
+            raw_light[21] = (uint8_t)(g_mains_hz >> 8);
+
+            // LightMetrics_Update counts 10 cycles and returns true once per second
+            if (LightMetrics_Update(&spectrum, &timestamp, g_mains_hz))
+            {
+                if (BLE_IsRawModeActive()) 
+                {
+                    // BLE_SendRawLightPacket(raw_light);
+                } 
+                else 
+                {  
+                    BLE_UnifiedPayload ble_payload;
+                    ble_payload.stepCount          = (uint16_t)ImuMetrics_GetStepCount();
+                    ble_payload.cadence            = (uint8_t)ImuMetrics_GetCadence();
+                    ble_payload.activityState      = (BLE_ActivityState)ImuMetrics_GetActivityState();
+                    ble_payload.uvRisk             = (uint16_t)LightMetrics_GetUvRisk();
+                    ble_payload.blueLightIntensity = LightMetrics_GetBlueIndex();
+                    ble_payload.blueLightRatio     = LightMetrics_GetBlueFracQ15();
+                    ble_payload.sunLikeIndex       = LightMetrics_GetSunLikeIndexQ15();
+                    ble_payload.metric1_clear      = spectrum.ch[10];
+                    
+                    // The Audio variables are always available here, regardless of IMU!
+                    ble_payload.noise_dbfs         = g_last_noise_dbfs;
+                    ble_payload.noise_dbspl        = g_last_noise_dbspl;
+
+                    BLE_SendUnifiedPacket(&ble_payload);
+                    LED_Toggle(LED_GREEN);
+                }
+            }
+        }
+
+        // Buffer Overflow Protection
         if (IMU_RingBuffer_OverflowCount(&g_imu_ring_buffer) > 0) {
             LED_On(LED_RED);
         }
-
-        /* ==============================================================
-         * 4. Mains flicker classification
-         * ============================================================== */
-        if ((HAL_GetTick() - g_last_flicker_update_ms) >= FLICKER_UPDATE_PERIOD_MS)
-        {
-            g_mains_hz = AS7341_DetectMainsHz();
-            g_last_flicker_update_ms = HAL_GetTick();
-        }
-        
-        // /* ==============================================================
-        //  * 5. Battery Telemetry (Every 60 seconds)
-        //  * ============================================================== */
-        // if ((HAL_GetTick() - g_last_battery_update_ms) >= 60000U)
-        // {
-        //     g_last_battery_update_ms = HAL_GetTick();
-            
-        //     // TODO: Read your actual ADC pin here to get the real battery voltage
-        //     // uint32_t raw_adc = HAL_ADC_GetValue(&hadc1);
-        //     // uint8_t batt_pct = calculate_percentage(raw_adc);
-            
-        //     uint8_t batt_pct = 85; // Hardcoded placeholder for now
-        //     BLE_SendBatteryPacket(batt_pct);
-        // }
-
         break;
       }
 
@@ -439,6 +438,32 @@ int main(void)
   } /* end while(1) */
   /* USER CODE END 3 */
 }
+
+// This calls might be implemented in the future for battery level, and mains flicker detection 
+/* ==============================================================
+         * 4. Mains flicker classification
+         * ============================================================== */
+        // if ((HAL_GetTick() - g_last_flicker_update_ms) >= FLICKER_UPDATE_PERIOD_MS)
+        // {
+        //     g_mains_hz = AS7341_DetectMainsHz();
+        //     g_last_flicker_update_ms = HAL_GetTick();
+        // }
+
+// /* ==============================================================
+        //  * 5. Battery Telemetry (Every 60 seconds)
+        //  * ============================================================== */
+        // if ((HAL_GetTick() - g_last_battery_update_ms) >= 60000U)
+        // {
+        //     g_last_battery_update_ms = HAL_GetTick();
+            
+        //     // TODO: Read your actual ADC pin here to get the real battery voltage
+        //     // uint32_t raw_adc = HAL_ADC_GetValue(&hadc1);
+        //     // uint8_t batt_pct = calculate_percentage(raw_adc);
+            
+        //     uint8_t batt_pct = 85; // Hardcoded placeholder for now
+        //     BLE_SendBatteryPacket(batt_pct);
+        // }
+
 
 /* ============================================================
  * Peripheral initialisation — unchanged from CubeMX output
@@ -738,6 +763,11 @@ void Error_Handler(void)
 {
   __disable_irq();
   while (1) {}
+}
+
+void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf) {
+    // The DMA finished grabbing the 64ms snapshot!
+    g_audio_ready_flag = 1U;
 }
 
 #ifdef USE_FULL_ASSERT

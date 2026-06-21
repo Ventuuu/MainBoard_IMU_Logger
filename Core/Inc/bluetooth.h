@@ -74,6 +74,8 @@ typedef struct {
     uint16_t          blueLightRatio;     ///< Blue/total ratio, Q15 fixed-point
     uint16_t          sunLikeIndex;       ///< Outdoor/indoor discriminator
     uint16_t          metric1_clear;      ///< AS7341 clear channel raw count
+    int8_t   noise_dbfs;                  ///< Range: -128 to +127
+    uint8_t  noise_dbspl;                 ///< Range: 0 to 255
 } BLE_UnifiedPayload;
 
 // --- Function Prototypes ---

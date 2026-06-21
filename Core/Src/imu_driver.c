@@ -72,6 +72,8 @@ void IMU_ConfigAccelerometer(uint8_t odr, uint8_t scale, uint8_t high_performanc
 
     // Write the new value back to the register
     imu_write_register(IMU_ACC_CTRL6_REG, ctrl6_value);
+
+    imu_write_register(IMU_INT1_CTRL_REG, 0x01);
 }
 
 /**
