@@ -14,6 +14,7 @@
 #include "main.h"
 
 #include "stm32u5xx_hal.h"
+#include <stdint.h>
 
 
 extern I2C_HandleTypeDef hi2c3;
@@ -23,11 +24,12 @@ static uint8_t as7341_read_register(uint8_t reg_addr, uint8_t *data, uint16_t le
 static uint8_t as7341_write_register(uint8_t reg_addr, uint8_t value);
 static uint8_t as7341_wait_avalid(uint32_t timeout_ms);
 static void    as7341_select_regbank(uint8_t enable_bank1);
-static void    as7341_smux_apply(AS7341_SmuxCmd cmd);
+static uint8_t    as7341_smux_apply(AS7341_SmuxCmd cmd);
 static void    as7341_smux_setup_F1F4_Clear_NIR(void);
 static void    as7341_smux_setup_F5F8_Clear_NIR(void);
 static void    as7341_smux_setup_FlickerPD(void);
 static uint16_t as7341_decode_flicker_mains(uint8_t fd_status);
+static uint8_t as7341_wait_smux_done(uint32_t timeout_ms);
 
 /* ---- Public Function Implementations ------------------------------------ */
 
@@ -106,36 +108,6 @@ uint8_t AS7341_ReadSixChannels(uint16_t *dst6) {
     return 1;
 }
 
-uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum) {
-    uint16_t tmp[6];
-    
-    if (spectrum == NULL) return 0;
-
-    /* --- Low channels: F1–F4 + Clear + NIR --- */
-    as7341_select_regbank(1U);
-    as7341_smux_setup_F1F4_Clear_NIR();
-    as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
-    as7341_select_regbank(0U);
-
-    if (!AS7341_ReadSixChannels(tmp)) return 0;
-    for (uint8_t i = 0; i < 6; i++) {
-        spectrum->ch[i] = tmp[i];
-    }
-
-    /* --- High channels: F5–F8 + Clear + NIR --- */
-    as7341_select_regbank(1U);
-    as7341_smux_setup_F5F8_Clear_NIR();
-    as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
-    as7341_select_regbank(0U);
-
-
-    if (!AS7341_ReadSixChannels(tmp))return 0;
-    for (uint8_t i = 0; i < 6; i++) {
-        spectrum->ch[6U + i] = tmp[i]; // PROBLEM! breaking line!
-    }
-
-    return 1;
-}
 
 uint16_t AS7341_DetectMainsHz(void) {
     uint8_t enable = 0;
