@@ -557,6 +557,118 @@ static LogStatus logger_usb_send(const uint8_t *data, uint16_t len)
     return LOG_OK;
 }
 
+static bool logger_magic_is_valid(uint32_t magic)
+{
+    return (magic == LOG_MAGIC_SENSOR) ||
+           (magic == LOG_MAGIC_AUDIO) ||
+           (magic == LOG_MAGIC_LIGHT);
+}
+
+static bool logger_header_is_valid(const LogPageHeader *header)
+{
+    if (header == NULL)
+    {
+        return false;
+    }
+
+    if (!logger_magic_is_valid(header->magic))
+    {
+        return false;
+    }
+
+    if ((header->version != 1U) ||
+        (header->header_size != LOG_HEADER_SIZE_BYTES) ||
+        (header->payload_bytes > LOG_SENSOR_PAYLOAD_BYTES))
+    {
+        return false;
+    }
+
+    if ((header->magic == LOG_MAGIC_SENSOR) &&
+        ((header->payload_bytes == 0U) ||
+         ((header->payload_bytes % LOG_SENSOR_RECORD_BYTES) != 0U)))
+    {
+        return false;
+    }
+
+    if ((header->magic == LOG_MAGIC_AUDIO) &&
+        ((header->payload_bytes == 0U) ||
+         ((header->payload_bytes % sizeof(int16_t)) != 0U)))
+    {
+        return false;
+    }
+
+    if ((header->magic == LOG_MAGIC_LIGHT) &&
+        (header->payload_bytes != AS7341_LIGHT_RESULT_RECORD_BYTES))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static LogStatus logger_recover_written_pages(NandLogger *logger,
+                                              uint32_t *written_pages)
+{
+    read_address_t addr;
+    column_address_t column = 0U;
+    LogPageHeader header;
+    uint32_t logical_page = 0U;
+    uint32_t max_pages;
+    uint16_t good_block_index;
+    uint8_t page_in_block;
+    int nand_ret;
+
+    if ((logger == NULL) || (written_pages == NULL))
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    *written_pages = 0U;
+
+    if (logger->good_block_count == 0U)
+    {
+        return LOG_ERR_NO_GOOD_BLOCKS;
+    }
+
+    max_pages = (uint32_t)logger->good_block_count * NAND_PAGES_PER_BLOCK;
+
+    while (logical_page < max_pages)
+    {
+        good_block_index = (uint16_t)(logical_page / NAND_PAGES_PER_BLOCK);
+        page_in_block = (uint8_t)(logical_page % NAND_PAGES_PER_BLOCK);
+
+        addr.block = logger->good_blocks[good_block_index];
+        addr.page = page_in_block;
+        addr.dummy = 0U;
+
+        memset(&header, 0xFF, sizeof(header));
+
+        nand_ret = spi_nand_page_read(addr,
+                                      column,
+                                      (uint8_t *)&header,
+                                      sizeof(header));
+
+        if (nand_ret != SPI_NAND_RET_OK)
+        {
+            return LOG_ERR_NAND;
+        }
+
+        if (!logger_header_is_valid(&header))
+        {
+            break;
+        }
+
+        logical_page++;
+    }
+
+    *written_pages = logical_page;
+    logger->page_sequence = logical_page;
+    logger->current_good_block_index = (uint16_t)(logical_page / NAND_PAGES_PER_BLOCK);
+    logger->current_page_in_block = (uint8_t)(logical_page % NAND_PAGES_PER_BLOCK);
+
+    return LOG_OK;
+}
+
 LogStatus NANDLogger_DownloadAll(NandLogger *logger)
 {
     uint32_t total_pages;
@@ -599,6 +711,19 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
      * di pagine effettivamente scritte in NAND.
      */
     total_pages = logger->page_sequence;
+
+    /*
+     * page_sequence vive in RAM. Se la board e' ripartita tra acquisizione
+     * e download, ricostruisci il conteggio leggendo gli header in NAND.
+     */
+    if (total_pages == 0U)
+    {
+        status = logger_recover_written_pages(logger, &total_pages);
+        if (status != LOG_OK)
+        {
+            return status;
+        }
+    }
 
     /*
      * Invio marker iniziale: 8 byte = "LOGSTART".
