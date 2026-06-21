@@ -31,8 +31,8 @@
   *    6. ImuMetrics_Update  → step count, cadence, activity state.
   *    7. Light sensor read every LIGHT_SUBSAMPLE ticks (10 Hz).
   *    8. BLE_SendUnifiedPacket (sent once per 1-second light window).
-  *    9. write_packet + write_memory  (NAND Flash).
-  *   10. Mains flicker update every 2 s.
+  *    9. write_packet + write_memory  (NAND Flash). Commented for now, not needed
+
   *
   * NVIC priority table
   * ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ uint8_t raw_gyroscope[6]     = {0};
 
 /* --- Light sensor --------------------------------------------------------- */
 static AS7341_Spectrum spectrum;
-uint8_t raw_light[22] = {0};
+uint8_t raw_light[20] = {0};
 
 /*
  * g_light_tick      — incremented in the ISR (volatile, 8-bit wraps freely).
@@ -384,6 +384,30 @@ int main(void)
             raw_light[17] = (uint8_t)(spectrum.ch[10] >> 8);
             raw_light[18] = (uint8_t)(spectrum.ch[11] & 0xFF);  
             raw_light[19] = (uint8_t)(spectrum.ch[11] >> 8);
+
+            if (LightMetrics_Update(&spectrum, &timestamp, 0))
+            {
+                // Only send the Unified Packet if Dev Mode is OFF
+                if (!BLE_IsRawModeActive())
+                {
+                    BLE_UnifiedPayload ble_payload;
+                    ble_payload.stepCount          = (uint16_t)ImuMetrics_GetStepCount();
+                    ble_payload.cadence            = (uint8_t)ImuMetrics_GetCadence();
+                    ble_payload.activityState      = (BLE_ActivityState)ImuMetrics_GetActivityState();
+                    ble_payload.uvRisk             = (uint16_t)LightMetrics_GetUvRisk();
+                    ble_payload.blueLightIntensity = LightMetrics_GetBlueIndex();
+                    ble_payload.blueLightRatio     = LightMetrics_GetBlueFracQ15();
+                    ble_payload.sunLikeIndex       = LightMetrics_GetSunLikeIndexQ15();
+                    ble_payload.metric1_clear      = spectrum.ch[10];
+                    
+                    // The Audio variables are always available here
+                    ble_payload.noise_dbfs         = g_last_noise_dbfs;
+                    ble_payload.noise_dbspl        = g_last_noise_dbspl;
+
+                    BLE_SendUnifiedPacket(&ble_payload);
+                    LED_Toggle(LED_GREEN);
+                }
+            }
         }
         
         /* ==============================================================
@@ -419,25 +443,7 @@ int main(void)
             // 4. Send the packet over BLE
             BLE_SendDevModePacket(&dev_payload);
         }
-        else
-        {
-            BLE_UnifiedPayload ble_payload;
-            ble_payload.stepCount          = (uint16_t)ImuMetrics_GetStepCount();
-            ble_payload.cadence            = (uint8_t)ImuMetrics_GetCadence();
-            ble_payload.activityState      = (BLE_ActivityState)ImuMetrics_GetActivityState();
-            ble_payload.uvRisk             = (uint16_t)LightMetrics_GetUvRisk();
-            ble_payload.blueLightIntensity = LightMetrics_GetBlueIndex();
-            ble_payload.blueLightRatio     = LightMetrics_GetBlueFracQ15();
-            ble_payload.sunLikeIndex       = LightMetrics_GetSunLikeIndexQ15();
-            ble_payload.metric1_clear      = spectrum.ch[10];
-            
-            // The Audio variables are always available here
-            ble_payload.noise_dbfs         = g_last_noise_dbfs;
-            ble_payload.noise_dbspl        = g_last_noise_dbspl;
 
-            BLE_SendUnifiedPacket(&ble_payload);
-            LED_Toggle(LED_GREEN);
-        }
         // Buffer Overflow Protection
         if (IMU_RingBuffer_OverflowCount(&g_imu_ring_buffer) > 0) {
             LED_On(LED_RED);

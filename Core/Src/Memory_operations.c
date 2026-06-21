@@ -117,9 +117,8 @@ void write_packet(uint16_t sample, Time_Struct timestamp,
 	NAND_packet[base + 35] = light_raw[18];  /* NIR LSB   */
 	NAND_packet[base + 36] = light_raw[19];  /* NIR MSB   */
 
-	/* Mains flicker category (2 bytes: indices 20..21, little-endian) */
-	NAND_packet[base + 37] = light_raw[20];
-	NAND_packet[base + 38] = light_raw[21];
+	NAND_packet[base + 37] = 0;
+	NAND_packet[base + 38] = 0;
 
 	/* Reserved byte: zero for now */
 	NAND_packet[base + 39] = 0x00;
