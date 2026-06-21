@@ -1480,6 +1480,7 @@ HAL_StatusTypeDef HAL_MDF_AcqStart_DMA(MDF_HandleTypeDef *hmdf, const MDF_Filter
   HAL_StatusTypeDef status = HAL_OK;
 
   /* Check parameters */
+
   if ((pFilterConfig == NULL) || (pDmaConfig == NULL))
   {
     status = HAL_ERROR;
@@ -1503,10 +1504,11 @@ HAL_StatusTypeDef HAL_MDF_AcqStart_DMA(MDF_HandleTypeDef *hmdf, const MDF_Filter
     {
       status = HAL_ERROR;
     }
-    else if (pFilterConfig->AcquisitionMode == MDF_MODE_SYNC_SNAPSHOT)
+      else if (pFilterConfig->AcquisitionMode == MDF_MODE_SYNC_SNAPSHOT) //FIRST HARD FAULT
     {
       status = HAL_ERROR;
     }
+    
     /* Check state */
     else if (hmdf->State != HAL_MDF_STATE_READY)
     {
@@ -1545,11 +1547,12 @@ HAL_StatusTypeDef HAL_MDF_AcqStart_DMA(MDF_HandleTypeDef *hmdf, const MDF_Filter
       {
         uint32_t SrcAddress;
 
-        if (pFilterConfig->ReshapeFilter.Activation == ENABLE)
+        if (pFilterConfig->ReshapeFilter.Activation == ENABLE) //SECOND HARD FAULT
         {
-          /* Enable reshape filter overrun interrupt */
+          // Enable reshape filter overrun interrupt 
           hmdf->Instance->DFLTIER |= MDF_DFLTIER_RFOVRIE;
         }
+          
 
         /* Enable saturation interrupt */
         hmdf->Instance->DFLTIER |= MDF_DFLTIER_SATIE;

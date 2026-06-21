@@ -50,7 +50,7 @@ HAL_StatusTypeDef PDM_Microphone_Start(MDF_HandleTypeDef *hmdf, UART_HandleTypeD
 
     // Aktiviert den Filter und startet die DMA-Akquisition im kontinuierlichen Modus.
     // Dies ist die offizielle STM32U5-HAL-Funktion für den MDF-Filter.
-    return HAL_MDF_AcqStart_DMA (hmdf, 0, Dma_config);
+    return HAL_MDF_AcqStart_DMA (hmdf, 1, Dma_config);
 }
 
 // --- VERARBEITUNG DER DATEN PER INTERRUPT-CALLBACKS ---

@@ -114,6 +114,10 @@ int exit_flag = 0;
 Time_Struct timestamp;
 uint16_t tim = 0;
 
+//mic variables
+ALIGN_32BYTES(int32_t buffer[FULL_BUFFER_SIZE]) __attribute__((section(".RAM_SRAM4"))); //memory buffer
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -453,7 +457,6 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.Trigger.Edge = MDF_FILTER_TRIG_RISING_EDGE;
   
   //DMA configs
-  int32_t buffer[FULL_BUFFER_SIZE];
   Dma_config.Address = (uint32_t)&buffer;
   Dma_config.DataLength = 1 * sizeof(uint32_t);
   Dma_config.MsbOnly = 0;
