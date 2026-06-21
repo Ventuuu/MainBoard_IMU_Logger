@@ -60,7 +60,7 @@ typedef enum {
  *   [6..7]   uvRisk          : UInt16-LE
  *   [8..9]   blueLightIntensity : UInt16-LE
  *   [10..11] blueLightRatio  : UInt16-LE  (Q15 fixed-point)
- *   [12..13] sunLikeIndex    : UInt16-LE
+ *   [12..13] ColourTemp      : UInt16-LE
  *   [14..15] metric1_clear   : UInt16-LE
  *   [16..18] reserved        : 0x00 0x00 0x00
  *   [19]     End sentinel    : 0x7D
@@ -71,11 +71,13 @@ typedef struct {
     BLE_ActivityState activityState;       ///< Current activity classification
     uint16_t          uvRisk;             ///< UV exposure proxy (abs. or frac.)
     uint16_t          blueLightIntensity; ///< Integrated AS7341 F3+F4 power
+    uint8_t           _padding;
     uint16_t          blueLightRatio;     ///< Blue/total ratio, Q15 fixed-point
-    uint16_t          sunLikeIndex;       ///< Outdoor/indoor discriminator
+    uint16_t          color_temp_k;       ///< Color temperature in Kelvin
     uint16_t          metric1_clear;      ///< AS7341 clear channel raw count
-    int8_t   noise_dbfs;                  ///< Range: -128 to +127
-    uint8_t  noise_dbspl;                 ///< Range: 0 to 255
+    int8_t            noise_dbfs;         ///< Range: -128 to +127
+    uint8_t           noise_dbspl;        ///< Range: 0 to 255
+   
 } BLE_UnifiedPayload;
 
 // Dev Mode Raw Packet - Exactly 18 Bytes!
@@ -89,6 +91,7 @@ typedef struct __attribute__((packed)) {
     int16_t  gyro_y;
     int16_t  gyro_z;
     uint16_t light_clear;   // Raw Light Clear Channel (ch[10])
+    uint16_t light_f3;      // AS7341 f3 channel raw count (ch[2])
     uint8_t  noise_dbspl;   // Raw Audio SPL
     int8_t   noise_dbfs;    // Raw Audio dBFS
 } BLE_DevModePayload;
@@ -105,7 +108,6 @@ void BLE_SendData(uint8_t *data, uint8_t data_length);
 void BLE_ReceiveData(uint8_t *data, uint8_t data_length);
 void BLE_StartRXInterrupt(void);
 bool BLE_IsRawModeActive(void);
-void BLE_SendBatteryPacket(uint8_t battery_percent);
 // Legacy packet sender (backward compatible)
 void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t *data_buffer);
 

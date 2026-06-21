@@ -14,7 +14,7 @@
  * ---------------------------------------------------------
  *   BlueIndex          = F3  (480 nm only, saturated to 16 bits)
  *   BlueFrac  (Q15)    = F3 / sum(F1..F8)              [0..32767]
- *   SunLikeIndex (Q15) = (F7+F8) / sum(F1..F8)         [0..32767]
+ *   ColorTempK          = Calculated from the full spectrum (see as7341_driver.h)
  *   UV_risk  (Q15)     = (F1+F2+F3) / sum(F1..F8)      [0..32767]
  *   BlueWeightedIll (Q15) = (F3+F4) / sum(F1..F8)      [0..32767]
  *
@@ -71,17 +71,17 @@ uint16_t LightMetrics_GetBlueIndex(void);
 uint16_t LightMetrics_GetBlueFracQ15(void);
 
 /**
- * SunLikeIndex Q15: (F7+F8) / sum(F1..F8).
+ * ColorTempK: Calculated from the full spectrum.
  *
  * High value -> red-rich, sun-like spectrum.
- * Low value  -> artificial (cool-white LED/fluorescent).
+ * Low value  -> blue-rich (artificial).
  *
  * Indicative ranges (calibrate with field data):
  *   Outdoor sunlight  : ~6000-12000
  *   Indoor cool-white : ~800-2500
  *   Indoor warm-white : ~2500-5000
  */
-uint16_t LightMetrics_GetSunLikeIndexQ15(void);
+uint16_t LightMetrics_CalculateKelvin(uint16_t* f_channels);
 
 /**
  * UV_risk Q15: (F1+F2+F3) / sum(F1..F8).

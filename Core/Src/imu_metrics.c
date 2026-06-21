@@ -2,40 +2,9 @@
  * @file imu_metrics.c
  * @brief Pedestrian motion metrics: step count, cadence, activity state.
  *
- * Inputs: IMU_Data structs already converted to physical units by imu_driver.c.
- *   acc  -> g    (gravitational units, FS +/-2 g by default)
- *   gyro -> dps  (degrees per second, FS +/-250 dps by default)
- * No further sensitivity scaling is applied here.
- *
- * -----------------------------------------------------------------------
- * Band-pass IIR filter
- * -----------------------------------------------------------------------
- * A single 2nd-order Butterworth biquad band-pass [1.5-2.5 Hz / 100 Hz]
- * implemented in Direct Form II Transposed. Coefficients computed with
- * scipy.signal.butter(1, [1.5, 2.5], btype='bandpass', fs=100):
- *
- *   b = [ 0.03046875,  0.0, -0.03046875 ]
- *   a = [ 1.0,        -1.92472215,  0.93906251 ]
- *
- * Frequency response:
- *   1.5 Hz : -3.01 dB  (lower -3 dB cutoff)
- *   2.0 Hz : -0.07 dB  (near-flat passband centre)
- *   2.5 Hz : -3.01 dB  (upper -3 dB cutoff)
- *
- * -----------------------------------------------------------------------
- * Dynamic threshold
- * -----------------------------------------------------------------------
- * Local maxima of the filtered signal are detected (sample n is a maximum
- * when filtered[n-1] < filtered[n] > filtered[n+1]). A rolling buffer of
- * the last IMU_METRICS_PEAK_WINDOW (200) samples' peak values feeds a
- * running mean that forms the adaptive threshold.
- *
- * -----------------------------------------------------------------------
- * Welford online variance
- * -----------------------------------------------------------------------
- * The variance of M(t) over a 100-sample window is computed with Welford's
- * algorithm (numerically stable, single-pass). The window resets every
- * IMU_METRICS_VAR_WINDOW samples for a clean 1 Hz activity state update.
+ * Inputs: IMU_Data structs already converted to physical units.
+ * acc  -> g    (gravitational units)
+ * gyro -> dps  (degrees per second)
  */
 
 #include "imu_metrics.h"
@@ -46,19 +15,11 @@
  * Band-pass biquad coefficients  [1.5-2.5 Hz, fs=100 Hz]
  * Direct Form II Transposed: a0 normalised to 1.0
  * ---------------------------------------------------------------------- */
-
 #define BPF_B0   0.0304687471f
 #define BPF_B1   0.0000000000f
 #define BPF_B2  (-0.0304687471f)
 #define BPF_A1  (-1.9247221530f)
 #define BPF_A2   0.9390625058f
-
-/* -------------------------------------------------------------------------
- * Activity state variance thresholds (g^2)
- * ---------------------------------------------------------------------- */
-
-#define THRESH_IDLE_WALKING  0.05f
-#define THRESH_WALKING_RUN   0.40f
 
 /* -------------------------------------------------------------------------
  * Internal state
@@ -93,23 +54,19 @@ static uint16_t s_cadence  = 0U;
 /* Global tick counter (100 Hz) */
 static uint32_t s_tick = 0U;
 
-/* Welford online variance for activity state */
-static uint32_t s_var_n    = 0U;
-static float    s_var_mean = 0.0f;
-static float    s_var_M2   = 0.0f;
+/* -------------------------------------------------------------------------
+ * Zero-Crossing Activity State Tracking
+ * ---------------------------------------------------------------------- */
+#define IMU_METRICS_ZC_WINDOW 100U // 1 second window at 100Hz
+static uint16_t s_zc_window_ctr = 0U;
+static uint16_t s_zc_count = 0U;
 static ImuActivityState s_activity = IMU_ACTIVITY_IDLE;
+
 
 /* -------------------------------------------------------------------------
  * Internal helpers
  * ---------------------------------------------------------------------- */
 
-/**
- * Apply one sample through the biquad band-pass filter.
- * Direct Form II Transposed:
- *   y[n] = b0*x[n] + w1[n-1]
- *   w1   = b1*x[n] - a1*y[n] + w2[n-1]
- *   w2   = b2*x[n] - a2*y[n]
- */
 static float bpf_step(float x)
 {
     float y  = BPF_B0 * x + s_bpf_w1;
@@ -118,10 +75,6 @@ static float bpf_step(float x)
     return y;
 }
 
-/**
- * Update cadence estimate using the circular timestamp buffer.
- * Called immediately after s_step_count is incremented.
- */
 static void update_cadence(void)
 {
     s_step_ts[s_ts_head] = s_tick;
@@ -143,11 +96,6 @@ static void update_cadence(void)
         return;
     }
 
-    /*
-     * cadence (spm) = (N_intervals / dt_seconds) * 60
-     *              = (N_intervals * 60 * SAMPLE_RATE) / dt_ticks
-     * factor = 60 * 100 = 6000
-     */
     uint32_t n_intervals = (uint32_t)(s_ts_count - 1U);
     s_cadence = (uint16_t)((n_intervals * 6000UL) / dt_ticks);
 }
@@ -178,10 +126,9 @@ void ImuMetrics_Reset(void)
 
     s_tick = 0U;
 
-    s_var_n    = 0U;
-    s_var_mean = 0.0f;
-    s_var_M2   = 0.0f;
-    s_activity = IMU_ACTIVITY_IDLE;
+    s_zc_window_ctr = 0U;
+    s_zc_count      = 0U;
+    s_activity      = IMU_ACTIVITY_IDLE;
 }
 
 /* -------------------------------------------------------------------------
@@ -198,54 +145,32 @@ void ImuMetrics_Update(const IMU_Data *acc, const IMU_Data *gyro)
 
     /* ------------------------------------------------------------------
      * 1. Vector magnitude (gravity removed)
-     *    Inputs are already in g (converted by imu_driver.c).
-     *    M(t) = sqrt(ax^2 + ay^2 + az^2) - 1.0  [g]
      * ------------------------------------------------------------------ */
     float mag_acc = sqrtf(acc->x * acc->x +
                           acc->y * acc->y +
                           acc->z * acc->z) - 1.0f;
 
-    /* Gyroscope magnitude [dps] — reserved for future gyro-variance feature */
+    /* Gyroscope magnitude [dps] — reserved for future use */
     (void)(gyro->x);
     (void)(gyro->y);
     (void)(gyro->z);
 
     /* ------------------------------------------------------------------
-     * 2. Welford online variance of mag_acc over IMU_METRICS_VAR_WINDOW
-     * ------------------------------------------------------------------ */
-    s_var_n++;
-    float delta  = mag_acc - s_var_mean;
-    s_var_mean  += delta / (float)s_var_n;
-    float delta2 = mag_acc - s_var_mean;
-    s_var_M2    += delta * delta2;
-
-    if (s_var_n >= IMU_METRICS_VAR_WINDOW) {
-        float variance = s_var_M2 / (float)(s_var_n - 1U);
-
-        if (variance < THRESH_IDLE_WALKING) {
-            s_activity = IMU_ACTIVITY_IDLE;
-        } else if (variance < THRESH_WALKING_RUN) {
-            s_activity = IMU_ACTIVITY_WALKING;
-        } else {
-            s_activity = IMU_ACTIVITY_RUNNING;
-        }
-
-        s_var_n    = 0U;
-        s_var_mean = 0.0f;
-        s_var_M2   = 0.0f;
-    }
-
-    /* ------------------------------------------------------------------
-     * 3. Band-pass filter [1.5-2.5 Hz]
+     * 2. Band-pass filter [1.5-2.5 Hz]
      * ------------------------------------------------------------------ */
     float filt = bpf_step(mag_acc);
 
     /* ------------------------------------------------------------------
-     * 4. Dynamic threshold: rolling mean of local peak values
+     * 3. Dynamic threshold: rolling mean of local peak values
      * ------------------------------------------------------------------ */
     float threshold = (s_peak_count > 0U)
                       ? (s_peak_sum / (float)s_peak_count)
                       : 0.0f;
+
+    // Hard Noise Floor: Prevents counting desk vibrations
+    if (threshold < 0.02f) {
+        threshold = 0.02f;
+    }
 
     if ((s_prev_filt > s_prev2_filt) &&
         (s_prev_filt > filt) &&
@@ -258,6 +183,33 @@ void ImuMetrics_Update(const IMU_Data *acc, const IMU_Data *gyro)
         if (s_peak_count < IMU_METRICS_PEAK_WINDOW) {
             s_peak_count++;
         }
+    }
+
+    /* ------------------------------------------------------------------
+     * 4. Rhythmic Activity State (Zero-Crossing Analysis)
+     * ------------------------------------------------------------------ */
+    s_zc_window_ctr++;
+    
+    // Count threshold crossings (Rhythmic Energy)
+    if ((s_prev_filt <= threshold) && (filt > threshold) && (threshold > 0.0f)) {
+        s_zc_count++;
+    }
+
+    // Evaluate every 1 second
+    if (s_zc_window_ctr >= IMU_METRICS_ZC_WINDOW) {
+        
+        if (s_zc_count == 0U) {
+            s_activity = IMU_ACTIVITY_IDLE;
+        } else if (s_zc_count < 3U) { 
+            // 1-2 crossings = walking
+            s_activity = IMU_ACTIVITY_WALKING;
+        } else {
+            // 3+ crossings = running
+            s_activity = IMU_ACTIVITY_RUNNING;
+        }
+
+        s_zc_window_ctr = 0U;
+        s_zc_count = 0U;
     }
 
     /* ------------------------------------------------------------------
@@ -277,6 +229,7 @@ void ImuMetrics_Update(const IMU_Data *acc, const IMU_Data *gyro)
         update_cadence();
     }
 
+    // Advance filter history
     s_prev2_filt = s_prev_filt;
     s_prev_filt  = filt;
 
@@ -284,11 +237,9 @@ void ImuMetrics_Update(const IMU_Data *acc, const IMU_Data *gyro)
      * 6. Cadence Timeout (Zeroing)
      * ------------------------------------------------------------------ */
     if (s_ts_count > 0U) {
-        // Find the index of the most recently recorded step
         uint8_t newest_idx = (s_ts_head + IMU_METRICS_CADENCE_BUF - 1U) % IMU_METRICS_CADENCE_BUF;
         uint32_t ticks_since_last_step = s_tick - s_step_ts[newest_idx];
         
-        // If 200 ticks (2.0 seconds at 100 Hz) have passed without a step, user has stopped.
         if (ticks_since_last_step > 200U) { 
             s_cadence = 0U;
         }
@@ -300,5 +251,5 @@ void ImuMetrics_Update(const IMU_Data *acc, const IMU_Data *gyro)
  * ---------------------------------------------------------------------- */
 
 uint32_t         ImuMetrics_GetStepCount(void)    { return s_step_count; }
-uint16_t         ImuMetrics_GetCadence(void)       { return s_cadence;    }
+uint16_t         ImuMetrics_GetCadence(void)      { return s_cadence;    }
 ImuActivityState ImuMetrics_GetActivityState(void) { return s_activity;   }

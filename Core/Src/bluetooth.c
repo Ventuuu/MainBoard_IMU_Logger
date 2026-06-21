@@ -145,8 +145,8 @@ void BLE_SendUnifiedPacket(const BLE_UnifiedPayload *payload) {
     frame[9]  = (uint8_t)(payload->blueLightIntensity >> 8u);
     frame[10] = (uint8_t)(payload->blueLightRatio & 0xFFu);
     frame[11] = (uint8_t)(payload->blueLightRatio >> 8u);
-    frame[12] = (uint8_t)(payload->sunLikeIndex & 0xFFu);
-    frame[13] = (uint8_t)(payload->sunLikeIndex >> 8u);
+    frame[12] = (uint8_t)(payload->color_temp_k & 0xFFu);
+    frame[13] = (uint8_t)(payload->color_temp_k >> 8u);
     frame[14] = (uint8_t)(payload->metric1_clear & 0xFFu);
     frame[15] = (uint8_t)(payload->metric1_clear >> 8u);
 

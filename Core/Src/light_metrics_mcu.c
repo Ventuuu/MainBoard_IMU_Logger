@@ -15,7 +15,7 @@
  * ------------------------------------------------------
  *   BlueIndex              = avg_F3  (saturated to uint16, raw count)
  *   BlueFrac    (Q15)      = avg_F3             / sum_avg
- *   SunLikeIndex (Q15)     = (avg_F7 + avg_F8)  / sum_avg
+ *   colourTempK              = Calculated from the full spectrum (see as7341_driver.h)
  *   uvRisk      (Q15)      = (avg_F1+F2+F3)     / sum_avg
  *   blueWeightedIll (Q15)  = (avg_F3 + avg_F4)  / sum_avg
  *
@@ -44,7 +44,6 @@ static SpectrumAccum s_accum = {0};
 
 static uint16_t s_blueIndex      = 0U;
 static uint16_t s_blueFrac_q15   = 0U;
-static uint16_t s_sunLikeIdx_q15 = 0U;
 static uint16_t s_uvRisk_q15     = 0U;
 static uint16_t s_blueCyanFrac_q15 = 0U;
 
@@ -75,7 +74,6 @@ static void compute_metrics(uint32_t F1, uint32_t F2, uint32_t F3,
     if (sum_all == 0U) {
         s_blueIndex        = 0U;
         s_blueFrac_q15     = 0U;
-        s_sunLikeIdx_q15   = 0U;
         s_uvRisk_q15       = 0U;
         s_blueCyanFrac_q15 = 0U;
         return;
@@ -96,9 +94,6 @@ static void compute_metrics(uint32_t F1, uint32_t F2, uint32_t F3,
 
     /* BlueFrac Q15: F3 / sum */
     s_blueFrac_q15 = (uint16_t)(((uint64_t)F3 * 32767ULL) / (uint64_t)sum_all);
-
-    /* SunLikeIndex Q15: (F7+F8) / sum */
-    s_sunLikeIdx_q15 = (uint16_t)(((uint64_t)(F7 + F8) * 32767ULL) / (uint64_t)sum_all);
 
     /* uvRisk Q15: (F1+F2+F3) / sum */
     s_uvRisk_q15 = (uint16_t)(((uint64_t)(F1 + F2 + F3) * 32767ULL) / (uint64_t)sum_all);
@@ -138,10 +133,8 @@ void LightMetrics_Reset(void)
 
     s_blueIndex        = 0U;
     s_blueFrac_q15     = 0U;
-    s_sunLikeIdx_q15   = 0U;
     s_uvRisk_q15       = 0U;
     s_blueCyanFrac_q15 = 0U;
-
     s_uvDoseAccum                 = 0ULL;
     s_blueExposureAccum           = 0ULL;
     s_circadianDoseAccum          = 0ULL;
@@ -152,6 +145,59 @@ void LightMetrics_Reset(void)
 /* -------------------------------------------------------------------------
  * Public: update (call at 10 Hz)
  * ---------------------------------------------------------------------- */
+#include <math.h>
+
+/**
+ * @brief Calculates Correlated Color Temperature (CCT) in Kelvin using McCamy's formula.
+ * @param f_channels Array of 8 uint16_t containing F1 through F8 raw counts.
+ * @return Temperature in Kelvin (e.g., 3200, 5500, 6500). Returns 0 if too dark.
+ */
+
+uint16_t LightMetrics_CalculateKelvin(uint16_t* f_channels) 
+{
+    // 1. Basic AS7341 to XYZ Transformation Matrix
+    // Maps the 8 physical wavelength bins to human eye responses
+    float X = (f_channels[1] * 0.015f) + (f_channels[2] * 0.114f) + 
+              (f_channels[3] * 0.132f) + (f_channels[4] * 0.054f) + 
+              (f_channels[5] * 0.187f) + (f_channels[6] * 0.444f) + 
+              (f_channels[7] * 0.536f) + (f_channels[8] * 0.101f);
+              
+    float Y = (f_channels[1] * 0.003f) + (f_channels[2] * 0.040f) + 
+              (f_channels[3] * 0.116f) + (f_channels[4] * 0.354f) + 
+              (f_channels[5] * 0.655f) + (f_channels[6] * 0.540f) + 
+              (f_channels[7] * 0.231f) + (f_channels[8] * 0.038f);
+              
+    float Z = (f_channels[1] * 0.068f) + (f_channels[2] * 0.547f) + 
+              (f_channels[3] * 0.669f) + (f_channels[4] * 0.165f) + 
+              (f_channels[5] * 0.035f) + (f_channels[6] * 0.005f) + 
+              (f_channels[7] * 0.000f) + (f_channels[8] * 0.000f);
+    float sum_XYZ = X + Y + Z;
+
+    // Protect against divide-by-zero in pitch black environments
+    if (sum_XYZ < 1.0f) {
+        return 0; // 0 Kelvin indicates no light
+    }
+
+    // 2. Calculate Chromaticity Coordinates (x, y)
+    float x = X / sum_XYZ;
+    float y = Y / sum_XYZ;
+
+    // 3. McCamy's Approximation Formula
+    // Calculates the "n" coefficient representing the inverse slope
+    float n = (x - 0.3320f) / (0.1858f - y);
+
+    // Apply the cubic polynomial
+    float cct = (449.0f * n * n * n) + 
+                (3525.0f * n * n) + 
+                (6823.3f * n) + 
+                5520.33f;
+
+    // Clamp values to standard physical lighting bounds (1000K to 12000K)
+    if (cct < 1000.0f)  cct = 1000.0f;
+    if (cct > 12000.0f) cct = 12000.0f;
+
+    return (uint16_t)cct;
+}
 
 uint8_t LightMetrics_Update(const AS7341_Spectrum *spectrum,
                              const Time_Struct     *timestamp,
@@ -213,7 +259,6 @@ uint8_t LightMetrics_Update(const AS7341_Spectrum *spectrum,
 
 uint16_t LightMetrics_GetBlueIndex(void)               { return s_blueIndex;         }
 uint16_t LightMetrics_GetBlueFracQ15(void)             { return s_blueFrac_q15;      }
-uint16_t LightMetrics_GetSunLikeIndexQ15(void)         { return s_sunLikeIdx_q15;    }
 uint32_t LightMetrics_GetUvRisk(void)                  { return s_uvRisk_q15;        }
 uint32_t LightMetrics_GetBlueWeightedIlluminance(void) { return s_blueCyanFrac_q15;  }
 

@@ -201,7 +201,7 @@ int main(void)
   MX_SPI3_Init();
 
   /* USER CODE BEGIN 2 */
-  LED_On(LED_RED);
+  //LED_On(LED_RED);
 
   BLE_Initialize();
   BLE_StartRXInterrupt();
@@ -213,19 +213,19 @@ int main(void)
 
   if (IMU_Init() == 1) {
     IMU_ConfigAccelerometer(ACC_ODR_52HZ, ACC_FS_2G, 1);
-    IMU_ConfigGyroscope    (GYR_ODR_52HZ, GYR_FS_250DPS, 1);
-  } else {
-    for (uint8_t i = 0; i < 6; i++) {
-      LED_Toggle(LED_RED); HAL_Delay(500);
-    }
-  }
+    IMU_ConfigGyroscope    (GYR_ODR_52HZ, GYR_FS_250DPS, 1);}
+  //  else {
+  //   for (uint8_t i = 0; i < 6; i++) {
+  //     LED_Toggle(LED_RED); HAL_Delay(500);
+  //   }
+  // }
 
-  if (AS7341_Init() != 1) {
-    for (uint8_t i = 0; i < 3; i++) {
-      LED_Toggle(LED_RED); HAL_Delay(150);
-      LED_Toggle(LED_RED); HAL_Delay(150);
-    }
-  }
+  // if (AS7341_Init() != 1) {
+  //   for (uint8_t i = 0; i < 3; i++) {
+  //     LED_Toggle(LED_RED); HAL_Delay(150);
+  //     LED_Toggle(LED_RED); HAL_Delay(150);
+  //   }
+  // }
 
   LightMetrics_Reset();
   ImuMetrics_Reset();
@@ -265,7 +265,7 @@ int main(void)
     static uint32_t last_blink = 0;
     if (HAL_GetTick() - last_blink > 500) {
         last_blink = HAL_GetTick();
-        LED_Toggle(LED_RED);
+        //LED_Toggle(LED_RED);
     }
     
     switch (current_state)
@@ -274,7 +274,7 @@ int main(void)
       case STATE_IDLE:
         if (usb_flag) {
           current_state = STATE_USB_CONNECTED;
-          LED_On(LED_GREEN);
+          //LED_On(LED_GREEN);
         }
         break;
 
@@ -334,14 +334,14 @@ int main(void)
             HAL_Delay(10);
             
             // Start the DMA capture in the background
-            MDF_DmaConfigTypeDef dma_config;
-            dma_config.Address    = (uint32_t)g_audio_buffer;
+            // MDF_DmaConfigTypeDef dma_config;
+            // dma_config.Address    = (uint32_t)g_audio_buffer;
             
-            // DataLength expects the size in bytes. 
-            // 1024 int16_t samples * 2 bytes per sample = 2048 bytes.
-            dma_config.DataLength = AUDIO_CHUNK_SIZE * 2; 
+            // // DataLength expects the size in bytes. 
+            // // 1024 int16_t samples * 2 bytes per sample = 2048 bytes.
+            // dma_config.DataLength = AUDIO_CHUNK_SIZE * 2; 
             
-            dma_config.MsbOnly    = DISABLE; // Keep full 16-bit resolution
+            // dma_config.MsbOnly    = DISABLE; // Keep full 16-bit resolution
             
             // Start the DMA capture in the background using the struct
             // HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
@@ -394,8 +394,9 @@ int main(void)
                     ble_payload.activityState      = (BLE_ActivityState)ImuMetrics_GetActivityState();
                     ble_payload.uvRisk             = (uint16_t)LightMetrics_GetUvRisk();
                     ble_payload.blueLightIntensity = LightMetrics_GetBlueIndex();
+                    ble_payload._padding           = 0;
                     ble_payload.blueLightRatio     = LightMetrics_GetBlueFracQ15();
-                    ble_payload.sunLikeIndex       = LightMetrics_GetSunLikeIndexQ15();
+                    ble_payload.color_temp_k       = LightMetrics_CalculateKelvin(spectrum.ch);
                     ble_payload.metric1_clear      = spectrum.ch[10];
                     
                     // The Audio variables are always available here
@@ -403,7 +404,7 @@ int main(void)
                     ble_payload.noise_dbspl        = g_last_noise_dbspl;
 
                     BLE_SendUnifiedPacket(&ble_payload);
-                    LED_Toggle(LED_GREEN);
+                    //LED_Toggle(LED_GREEN);
                 }
             }
         }
@@ -420,6 +421,7 @@ int main(void)
             last_dev_tx_ms = current_tick;
             
             BLE_DevModePayload dev_payload;
+            dev_payload.header = 0x77;
             dev_payload.counter = g_dev_packet_counter++;
             
             // 1. Grab the latest raw IMU values (Combining MSB and LSB bytes)
@@ -431,8 +433,9 @@ int main(void)
             dev_payload.gyro_y = (int16_t)((raw_gyroscope[3] << 8) | raw_gyroscope[2]);
             dev_payload.gyro_z = (int16_t)((raw_gyroscope[5] << 8) | raw_gyroscope[4]);
             
-            // 2. Grab the latest Light Sensor Clear channel (ch[10])
+            // 2. Grab the latest Light Sensor channels (F3, Clear)
             dev_payload.light_clear = spectrum.ch[10];
+            dev_payload.light_f3 = spectrum.ch[2];
             
             // 3. Grab the latest Audio Metrics
             dev_payload.noise_dbspl = g_last_noise_dbspl;
@@ -444,7 +447,7 @@ int main(void)
 
         // Buffer Overflow Protection
         if (IMU_RingBuffer_OverflowCount(&g_imu_ring_buffer) > 0) {
-            LED_On(LED_RED);
+            //LED_On(LED_RED);
         }
         break;
       }

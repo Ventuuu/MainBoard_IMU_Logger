@@ -28,7 +28,7 @@ MainBoard_IMU_Logger/
 │   │   ├── imu_metrics.h         # Step counting, cadence & activity-state API
 │   │   ├── imu_ring_buffer.h     # Lock-free power-of-2 ring buffer for IMU samples
 │   │   ├── as7341_driver.h       # AS7341 SMUX config, two-pass readout API
-│   │   ├── light_metrics_mcu.h   # Q15 photobiology math (Blue ratio, SunLike, UV)
+│   │   ├── light_metrics_mcu.h   # Q15 photobiology math (Blue ratio, ColourTemp, UV)
 │   │   ├── bluetooth.h           # RN4871 UART API & 0x7B/0x7D packet framing
 │   │   ├── led_driver.h          # Status LED blink patterns
 │   │   ├── Memory_operations.h   # High-level NAND bad-block bookkeeping
@@ -82,7 +82,7 @@ Byte  0     1      2–3         4         5              6–7        8–9
       0x7B  0x55   stepCount   cadence   activityState  uvRisk     blueIntensity
 
 Byte  10–11        12–13           14–15           16–18      19
-      blueRatio    sunLikeIndex    clearChannel    reserved   0x7D
+      blueRatio    ColourTemp    clearChannel    reserved   0x7D
 
 Field	Byte Offset	Type	Units / Notes
 stepCount	2–3	uint16_t	Cumulative steps (wraps at 65535)
@@ -91,7 +91,7 @@ activityState	5	uint8_t	0=IDLE, 1=WALKING, 2=RUNNING
 uvRisk	6–7	uint16_t	Q15 fraction (0.0 – 1.0)
 blueIntensity	8–9	uint16_t	Raw integrated AS7341 blue power
 blueRatio	10–11	uint16_t	Q15 fraction (0.0 – 1.0) of blue spectrum
-sunLikeIndex	12–13	uint16_t	Q15 fraction (0.0 – 1.0)
+colorTemp 
 clearChannel	14–15	uint16_t	Broad-spectrum illuminance proxy
 
 ## Photobiology Metrics (light_metrics_mcu.c)
@@ -100,7 +100,6 @@ The AS7341 SMUX is dynamically reconfigured to capture both visible and NIR band
 Metric	Derivation Math (Q15 Fixed-Point)
 UV Risk	Scaled F1 (415 nm) + F2 (445 nm) count. Normalised to a Q15 float.
 Blue Ratio	F2 / (F1 + F2 + F3 + F4 + F5 + F6 + F7 + F8). Used by client to calculate Circadian disruption after 19:00.
-SunLike Index	NIR / Visible_Sum. Used to discriminate between direct sunlight (>0.80) and artificial indoor light (<0.35).
 Clear Channel	Raw un-filtered photodiode count representing overall environmental brightness.
 
 ## IMU Metrics (imu_metrics.c)
