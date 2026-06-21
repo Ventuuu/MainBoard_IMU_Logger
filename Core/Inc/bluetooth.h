@@ -78,6 +78,21 @@ typedef struct {
     uint8_t  noise_dbspl;                 ///< Range: 0 to 255
 } BLE_UnifiedPayload;
 
+// Dev Mode Raw Packet - Exactly 18 Bytes!
+typedef struct __attribute__((packed)) {
+    uint8_t  header;        // Always 0x77 for Dev Mode
+    uint8_t  counter;       // 0-255 looping counter to spot dropped packets
+    int16_t  acc_x;         // Raw 16-bit Accelerometer
+    int16_t  acc_y;
+    int16_t  acc_z;
+    int16_t  gyro_x;        // Raw 16-bit Gyroscope
+    int16_t  gyro_y;
+    int16_t  gyro_z;
+    uint16_t light_clear;   // Raw Light Clear Channel (ch[10])
+    uint8_t  noise_dbspl;   // Raw Audio SPL
+    int8_t   noise_dbfs;    // Raw Audio dBFS
+} BLE_DevModePayload;
+
 // --- Function Prototypes ---
 void BLE_HardReset(void);
 void BLE_Initialize(void);
@@ -95,6 +110,7 @@ void BLE_SendBatteryPacket(uint8_t battery_percent);
 void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t *data_buffer);
 
 void BLE_SendRawLightPacket(uint8_t *raw_light_array);
+void BLE_SendDevModePacket(BLE_DevModePayload* payload);
 /**
  * @brief Serialise and transmit a unified 20-byte sensor packet.
  *

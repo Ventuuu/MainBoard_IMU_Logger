@@ -72,8 +72,6 @@
 /* USER CODE BEGIN PD */
 /** Light sensor sampled every LIGHT_SUBSAMPLE IMU ticks (100 Hz / 10 = 10 Hz) */
 #define LIGHT_SUBSAMPLE           10U
-/** Interval (ms) between mains flicker classification updates */
-#define FLICKER_UPDATE_PERIOD_MS  2000U
 
 /* --- Intermittent Audio Variables --- */
 #define AUDIO_CHUNK_SIZE 1024
@@ -119,12 +117,9 @@ uint8_t raw_light[22] = {0};
  * g_light_tick_last — last value consumed by main loop (non-volatile copy).
  */
 static volatile uint8_t g_light_tick      = 0U;
-static          uint8_t g_light_tick_last = 0U;
 
-/* Latest mains flicker classification (updated every 2 s in main loop) */
-static volatile uint16_t g_mains_hz              = 0U;
-static          uint32_t g_last_flicker_update_ms = 0U;
-
+/* --- Dev mode counter ------------------------------------------------------ */
+static uint8_t g_dev_packet_counter = 0;
 // NEW: Battery telemetry tracker
 // static          uint32_t g_last_battery_update_ms = 0U;
 
@@ -268,14 +263,13 @@ int main(void)
   {
   /* USER CODE END WHILE */
   /* USER CODE BEGIN 3 */
-    // ADD THIS HEARTBEAT: Toggle an LED every 500ms
+    // ADD THIS HEARTBEAT: Toggle an LED every 500ms as a heartbeat indicator that the main loop is running. 
     static uint32_t last_blink = 0;
     if (HAL_GetTick() - last_blink > 500) {
         last_blink = HAL_GetTick();
         LED_Toggle(LED_RED);
     }
     
-
     switch (current_state)
     {
       /* ------------------------------------------------------------------ */
@@ -311,12 +305,12 @@ int main(void)
             memcpy(raw_sample.gyro, raw_gyroscope,     6);
             IMU_RingBuffer_Push(&g_imu_ring_buffer, &raw_sample);
             
-            // LED_Toggle(LED_RED); // Keep your debug toggles if you like!
+            // LED_Toggle(LED_RED); // debug toggle
             // printf("RB IMU s\n");
         }
 
         /* ==============================================================
-         * TASK 2: The IMU Math (Safely does nothing if IMU is unplugged!)
+         * TASK 2: The IMU Math (Software Driven - 100Hz)
          * ============================================================== */
         IMU_RawData_t popped;
         while (IMU_RingBuffer_Pop(&g_imu_ring_buffer, &popped))
@@ -324,11 +318,6 @@ int main(void)
             IMU_ConvertAccelRawToFloat(&accelerometer_data, popped.acc);
             IMU_ConvertGyroRawToFloat(&gyroscope_data,     popped.gyro);
             ImuMetrics_Update(&accelerometer_data, &gyroscope_data);
-
-            if (BLE_IsRawModeActive()) {
-                BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, popped.acc);
-                BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, popped.gyro); 
-            }
 
             // NAND writing requires sequential IMU data
             sample++;
@@ -347,7 +336,17 @@ int main(void)
             HAL_Delay(10);
             
             // Start the DMA capture in the background
-            HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, (uint8_t *)g_audio_buffer, AUDIO_CHUNK_SIZE);
+            MDF_DmaConfigTypeDef dma_config;
+            dma_config.Address    = (uint32_t)g_audio_buffer;
+            
+            // DataLength expects the size in bytes. 
+            // 1024 int16_t samples * 2 bytes per sample = 2048 bytes.
+            dma_config.DataLength = AUDIO_CHUNK_SIZE * 2; 
+            
+            dma_config.MsbOnly    = DISABLE; // Keep full 16-bit resolution
+            
+            // Start the DMA capture in the background using the struct
+            HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
         }
 
         /* ==============================================================
@@ -359,7 +358,7 @@ int main(void)
             float noise_dbspl = MicMetrics_CalculateNoise_dBSPL(g_audio_buffer, AUDIO_CHUNK_SIZE);
             float noise_dbfs  = MicMetrics_CalculateNoise_dBFS(g_audio_buffer, AUDIO_CHUNK_SIZE);
             
-            // Turn off the peripheral to save battery!
+            // Turn off the peripheral to save battery
             HAL_MDF_AcqStop_DMA(&MdfHandle0);
             
             g_last_noise_dbfs  = (int8_t)noise_dbfs;
@@ -367,7 +366,7 @@ int main(void)
         }
 
         /* ==============================================================
-         * TASK 5: The Light Sensor & BLE Transmission (Timer Driven - 10Hz)
+         * TASK 5: The Light Sensor (Timer Driven - 10Hz)
          * ============================================================== */
         static uint32_t last_light_read_ms = 0;
         if (current_tick - last_light_read_ms >= 100) 
@@ -385,38 +384,60 @@ int main(void)
             raw_light[17] = (uint8_t)(spectrum.ch[10] >> 8);
             raw_light[18] = (uint8_t)(spectrum.ch[11] & 0xFF);  
             raw_light[19] = (uint8_t)(spectrum.ch[11] >> 8);
-            raw_light[20] = (uint8_t)(g_mains_hz & 0xFF);
-            raw_light[21] = (uint8_t)(g_mains_hz >> 8);
-
-            // LightMetrics_Update counts 10 cycles and returns true once per second
-            if (LightMetrics_Update(&spectrum, &timestamp, g_mains_hz))
-            {
-                if (BLE_IsRawModeActive()) 
-                {
-                    // BLE_SendRawLightPacket(raw_light);
-                } 
-                else 
-                {  
-                    BLE_UnifiedPayload ble_payload;
-                    ble_payload.stepCount          = (uint16_t)ImuMetrics_GetStepCount();
-                    ble_payload.cadence            = (uint8_t)ImuMetrics_GetCadence();
-                    ble_payload.activityState      = (BLE_ActivityState)ImuMetrics_GetActivityState();
-                    ble_payload.uvRisk             = (uint16_t)LightMetrics_GetUvRisk();
-                    ble_payload.blueLightIntensity = LightMetrics_GetBlueIndex();
-                    ble_payload.blueLightRatio     = LightMetrics_GetBlueFracQ15();
-                    ble_payload.sunLikeIndex       = LightMetrics_GetSunLikeIndexQ15();
-                    ble_payload.metric1_clear      = spectrum.ch[10];
-                    
-                    // The Audio variables are always available here, regardless of IMU!
-                    ble_payload.noise_dbfs         = g_last_noise_dbfs;
-                    ble_payload.noise_dbspl        = g_last_noise_dbspl;
-
-                    BLE_SendUnifiedPacket(&ble_payload);
-                    LED_Toggle(LED_GREEN);
-                }
-            }
         }
+        
+        /* ==============================================================
+         * TASK 6: Dev Mode "Omnibus" Transmission (Timer Driven - 20Hz) 
+                    & Normal Mode Unified Packet (Timer Driven - 1Hz)
+         * ============================================================== */
+        static uint32_t last_dev_tx_ms = 0;
+        
+        // 50ms = 20Hz refresh rate.
+        if (BLE_IsRawModeActive() && (current_tick - last_dev_tx_ms >= 50)) 
+        {
+            last_dev_tx_ms = current_tick;
+            
+            BLE_DevModePayload dev_payload;
+            dev_payload.counter = g_dev_packet_counter++;
+            
+            // 1. Grab the latest raw IMU values (Combining MSB and LSB bytes)
+            dev_payload.acc_x = (int16_t)((raw_accelerometer[1] << 8) | raw_accelerometer[0]);
+            dev_payload.acc_y = (int16_t)((raw_accelerometer[3] << 8) | raw_accelerometer[2]);
+            dev_payload.acc_z = (int16_t)((raw_accelerometer[5] << 8) | raw_accelerometer[4]);
+            
+            dev_payload.gyro_x = (int16_t)((raw_gyroscope[1] << 8) | raw_gyroscope[0]);
+            dev_payload.gyro_y = (int16_t)((raw_gyroscope[3] << 8) | raw_gyroscope[2]);
+            dev_payload.gyro_z = (int16_t)((raw_gyroscope[5] << 8) | raw_gyroscope[4]);
+            
+            // 2. Grab the latest Light Sensor Clear channel (ch[10])
+            dev_payload.light_clear = spectrum.ch[10];
+            
+            // 3. Grab the latest Audio Metrics
+            dev_payload.noise_dbspl = g_last_noise_dbspl;
+            dev_payload.noise_dbfs  = g_last_noise_dbfs;
 
+            // 4. Send the packet over BLE
+            BLE_SendDevModePacket(&dev_payload);
+        }
+        else
+        {
+            BLE_UnifiedPayload ble_payload;
+            ble_payload.stepCount          = (uint16_t)ImuMetrics_GetStepCount();
+            ble_payload.cadence            = (uint8_t)ImuMetrics_GetCadence();
+            ble_payload.activityState      = (BLE_ActivityState)ImuMetrics_GetActivityState();
+            ble_payload.uvRisk             = (uint16_t)LightMetrics_GetUvRisk();
+            ble_payload.blueLightIntensity = LightMetrics_GetBlueIndex();
+            ble_payload.blueLightRatio     = LightMetrics_GetBlueFracQ15();
+            ble_payload.sunLikeIndex       = LightMetrics_GetSunLikeIndexQ15();
+            ble_payload.metric1_clear      = spectrum.ch[10];
+            
+            // The Audio variables are always available here
+            ble_payload.noise_dbfs         = g_last_noise_dbfs;
+            ble_payload.noise_dbspl        = g_last_noise_dbspl;
+
+            BLE_SendUnifiedPacket(&ble_payload);
+            LED_Toggle(LED_GREEN);
+        }
         // Buffer Overflow Protection
         if (IMU_RingBuffer_OverflowCount(&g_imu_ring_buffer) > 0) {
             LED_On(LED_RED);
@@ -439,16 +460,7 @@ int main(void)
   /* USER CODE END 3 */
 }
 
-// This calls might be implemented in the future for battery level, and mains flicker detection 
-/* ==============================================================
-         * 4. Mains flicker classification
-         * ============================================================== */
-        // if ((HAL_GetTick() - g_last_flicker_update_ms) >= FLICKER_UPDATE_PERIOD_MS)
-        // {
-        //     g_mains_hz = AS7341_DetectMainsHz();
-        //     g_last_flicker_update_ms = HAL_GetTick();
-        // }
-
+// This call might be implemented in the future for battery level
 // /* ==============================================================
         //  * 5. Battery Telemetry (Every 60 seconds)
         //  * ============================================================== */

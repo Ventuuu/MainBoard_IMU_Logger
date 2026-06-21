@@ -53,6 +53,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/SPI_NAND.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/as7341_driver.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/light_metrics_mcu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/mic_metrics.c
     ${CMAKE_CURRENT_SOURCE_DIR}/USB_Device/App/usbd_cdc_if.c
     ${CMAKE_CURRENT_SOURCE_DIR}/USB_Device/App/usbd_desc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/USB_Device/App/usb_device.c

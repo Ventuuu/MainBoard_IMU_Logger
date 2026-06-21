@@ -17,7 +17,7 @@ static uint8_t rx_cmd_idx = 0;
 
 // --- Helper Functions (Internal to this file) ---
 static void enter_command_mode(void);
-static void exit_command_mode(void);
+//static void exit_command_mode(void);
 
 // --- Public Function Implementations ---
 
@@ -174,6 +174,14 @@ void BLE_SendRawLightPacket(uint8_t *raw_light_array) {
     
     BLE_SendData(frame, PACKET_LENGTH);
 }
+
+void BLE_SendDevModePacket(BLE_DevModePayload* payload) {
+    // Force the header to 0x77 (119 in decimal) so Flutter knows what this is
+    payload->header = 0x77; 
+    
+    // Send the 18 bytes over the UART to the RN4871
+    HAL_UART_Transmit(&huart3, (uint8_t*)payload, sizeof(BLE_DevModePayload), UART_TIMEOUT);
+}
 // /**
 //  * @brief Splits the 22-byte raw light array into two 20-byte BLE packets for Developer Mode.
 //  */
@@ -240,8 +248,8 @@ static void enter_command_mode(void) {
     HAL_Delay(100);
 }
 
-static void exit_command_mode(void) {
-    uint8_t data_mode_command[] = "---\r";
-    BLE_SendData(data_mode_command, sizeof(data_mode_command) - 1);
-    HAL_Delay(100);
-}
+// static void exit_command_mode(void) {
+//     uint8_t data_mode_command[] = "---\r";
+//     BLE_SendData(data_mode_command, sizeof(data_mode_command) - 1);
+//     HAL_Delay(100);
+// }
