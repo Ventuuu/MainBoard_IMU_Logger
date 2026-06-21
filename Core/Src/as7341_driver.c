@@ -194,12 +194,22 @@ uint16_t AS7341_DetectMainsHz(void) {
 
 /* ---- Private Helper Implementations ------------------------------------ */
 
-static uint8_t as7341_read_register(uint8_t reg_addr, uint8_t *data, uint16_t len) {
-    if (HAL_I2C_Master_Transmit(&hi2c3, AS7341_I2C_ADDRESS << 1, &reg_addr, 1, AS7341_I2C_TIMEOUT) != HAL_OK)
-        return 0;
-    if (HAL_I2C_Master_Receive(&hi2c3, AS7341_I2C_ADDRESS << 1, data, len, AS7341_I2C_TIMEOUT) != HAL_OK)
-        return 0;
-    return 1;
+static uint8_t as7341_read_register(uint8_t reg_addr,
+                                    uint8_t *data,
+                                    uint16_t len)
+{
+    return
+    (
+        HAL_I2C_Mem_Read(
+            &hi2c3,
+            AS7341_I2C_ADDRESS << 1,
+            reg_addr,
+            I2C_MEMADD_SIZE_8BIT,
+            data,
+            len,
+            AS7341_I2C_TIMEOUT
+        ) == HAL_OK
+    );
 }
 
 static uint8_t as7341_write_register(uint8_t reg_addr, uint8_t value) {
@@ -233,21 +243,29 @@ static void as7341_select_regbank(uint8_t enable_bank1) {
     as7341_write_register(AS7341_REG_CFG0, cfg0);
 }
 
-static void as7341_smux_apply(AS7341_SmuxCmd cmd) {
-    /* Program CFG6 lower bits with SMUX command, then set SMUXEN in ENABLE. */
-    uint8_t cfg6 = 0;
-    uint8_t enable = 0;
+static uint8_t as7341_smux_apply(AS7341_SmuxCmd cmd)
+{
+    uint8_t cfg6;
+    uint8_t enable;
 
-    as7341_read_register(AS7341_REG_CFG6, &cfg6, 1);
+    if (!as7341_read_register(AS7341_REG_CFG6, &cfg6, 1))
+        return 0;
+
     cfg6 &= (uint8_t)~0x03U;
-    cfg6 |= (uint8_t)cmd & 0x03U;
-    as7341_write_register(AS7341_REG_CFG6, cfg6);
+    cfg6 |= ((uint8_t)cmd & 0x03U);
 
-    as7341_read_register(AS7341_REG_ENABLE, &enable, 1);
+    if (!as7341_write_register(AS7341_REG_CFG6, cfg6))
+        return 0;
+
+    if (!as7341_read_register(AS7341_REG_ENABLE, &enable, 1))
+        return 0;
+
     enable |= AS7341_SMUXEN;
-    as7341_write_register(AS7341_REG_ENABLE, enable);
 
-    /* SMUXEN self-clears when the SMUX command is finished; no need to poll. */
+    if (!as7341_write_register(AS7341_REG_ENABLE, enable))
+        return 0;
+
+    return as7341_wait_smux_done(100U);
 }
 
 /* The following SMUX configurations are direct translations of the
@@ -339,4 +357,103 @@ static uint16_t as7341_decode_flicker_mains(uint8_t fd_status) {
         default:
             return 0U;   /* treat as natural / non-mains */
     }
+}
+
+
+//Luca Commit
+static uint8_t as7341_wait_smux_done(uint32_t timeout_ms)
+{
+    uint32_t start = HAL_GetTick();
+    uint8_t enable;
+
+    while ((HAL_GetTick() - start) < timeout_ms)
+    {
+        if (!as7341_read_register(AS7341_REG_ENABLE, &enable, 1))
+            return 0;
+
+        if ((enable & AS7341_SMUXEN) == 0)
+            return 1;
+    }
+
+    return 0;
+}
+
+
+static uint8_t as7341_set_spectral_enable(uint8_t enable_state)
+{
+    uint8_t enable;
+
+    if (!as7341_read_register(AS7341_REG_ENABLE, &enable, 1))
+        return 0;
+
+    if (enable_state)
+        enable |= AS7341_SP_EN;
+    else
+        enable &= (uint8_t)~AS7341_SP_EN;
+
+    return as7341_write_register(AS7341_REG_ENABLE, enable);
+}
+
+
+static uint8_t as7341_capture_smux(
+    void (*smux_setup)(void),
+    uint16_t *dst6)
+{
+    if (!as7341_set_spectral_enable(0))
+        return 0;
+
+    as7341_select_regbank(1);
+
+    smux_setup();
+
+    if (!as7341_smux_apply(AS7341_SMUX_CMD_WRITE))
+        return 0;
+
+    as7341_select_regbank(0);
+
+    if (!as7341_set_spectral_enable(1))
+        return 0;
+
+    HAL_Delay(20);
+
+    return AS7341_ReadSixChannels(dst6);
+}
+
+
+uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum)
+{
+    uint16_t tmp[6];
+
+    if (spectrum == NULL)
+        return 0;
+
+    /* F1-F4 + CLEAR + NIR */
+
+    if (!as7341_capture_smux(
+            as7341_smux_setup_F1F4_Clear_NIR,
+            tmp))
+    {
+        return 0;
+    }
+
+    for (uint8_t i = 0; i < 6; i++)
+    {
+        spectrum->ch[i] = tmp[i];
+    }
+
+    /* F5-F8 + CLEAR + NIR */
+
+    if (!as7341_capture_smux(
+            as7341_smux_setup_F5F8_Clear_NIR,
+            tmp))
+    {
+        return 0;
+    }
+
+    for (uint8_t i = 0; i < 6; i++)
+    {
+        spectrum->ch[6 + i] = tmp[i];
+    }
+
+    return 1;
 }
