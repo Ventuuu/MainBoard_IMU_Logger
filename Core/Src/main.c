@@ -73,15 +73,6 @@
 /** Light sensor sampled every LIGHT_SUBSAMPLE IMU ticks (100 Hz / 10 = 10 Hz) */
 #define LIGHT_SUBSAMPLE           10U
 
-/* --- Intermittent Audio Variables --- */
-#define AUDIO_CHUNK_SIZE 1024
-int16_t g_audio_buffer[AUDIO_CHUNK_SIZE] = {0}; 
-
-volatile uint8_t g_audio_ready_flag = 0U;
-static uint32_t last_audio_check_ms = 0U;
-static int8_t  g_last_noise_dbfs  = -100; // Default to absolute silence
-static uint8_t g_last_noise_dbspl = 0;    // Default to 0 SPL
-
 /* USER CODE END PD */
 
 /* Private variables ---------------------------------------------------------*/
@@ -117,6 +108,15 @@ uint8_t raw_light[20] = {0};
  * g_light_tick_last — last value consumed by main loop (non-volatile copy).
  */
 static volatile uint8_t g_light_tick      = 0U;
+
+// --- Intermittent Audio Snapshot Buffer ---
+#define PCM_FRAME_SIZE 256 
+int16_t s_pcm_buffer[PCM_FRAME_SIZE];
+
+volatile uint8_t g_audio_ready_flag = 0;
+int8_t  g_last_noise_dbfs = -100;
+uint8_t g_last_noise_dbspl = 0;
+static uint32_t last_audio_check_ms = 0U;
 
 /* --- Dev mode counter ------------------------------------------------------ */
 static uint8_t g_dev_packet_counter = 0;
@@ -195,11 +195,12 @@ int main(void)
   MX_I2C3_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
+  MX_GPDMA1_Init();
   MX_MDF1_Init();
   MX_TIM2_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
-  MX_GPDMA1_Init();
+  
 
   /* USER CODE BEGIN 2 */
   //LED_On(LED_RED);
@@ -331,20 +332,17 @@ int main(void)
         if (current_tick - last_audio_check_ms >= 10000) {
             last_audio_check_ms = current_tick;
             
-            // Give the MP34DT06J 10ms to stabilize its internal capacitors
+            // Give the Mic 10ms to stabilize
             HAL_Delay(10);
+
+            // 1. Configure the DMA transfer for this specific snapshot
+            static MDF_DmaConfigTypeDef dma_config;
+            dma_config.Address    = (uint32_t)s_pcm_buffer;
             
-            // Start the DMA capture in the background
-            MDF_DmaConfigTypeDef dma_config;
-            dma_config.Address    = (uint32_t)g_audio_buffer;
+            // Length in bytes: 256 samples * 2 bytes per int16 = 512 bytes
+            dma_config.DataLength = PCM_FRAME_SIZE * 2;
+            dma_config.MsbOnly    = DISABLE;
             
-            // DataLength expects the size in bytes. 
-            // 1024 int16_t samples * 2 bytes per sample = 2048 bytes.
-            dma_config.DataLength = AUDIO_CHUNK_SIZE * 2; 
-            
-            dma_config.MsbOnly    = DISABLE; // Keep full 16-bit resolution
-            
-            //Start the DMA capture in the background using the struct
             HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
         }
 
@@ -353,15 +351,15 @@ int main(void)
          * ============================================================== */
         if (g_audio_ready_flag) {
             g_audio_ready_flag = 0;
-            
-            float noise_dbspl = MicMetrics_CalculateNoise_dBSPL(g_audio_buffer, AUDIO_CHUNK_SIZE);
-            float noise_dbfs  = MicMetrics_CalculateNoise_dBFS(g_audio_buffer, AUDIO_CHUNK_SIZE);
-            
-            Turn off the peripheral to save battery
+
+            //Turn off the peripheral to save battery
             HAL_MDF_AcqStop_DMA(&MdfHandle0);
+
+            float calc_dbfs, calc_spl;
+            MicMetrics_ProcessFrame(s_pcm_buffer, PCM_FRAME_SIZE, &calc_dbfs, &calc_spl);
             
-            g_last_noise_dbfs  = (int8_t)noise_dbfs;
-            g_last_noise_dbspl = (uint8_t)noise_dbspl;
+            g_last_noise_dbfs  = (int8_t)calc_dbfs;
+            g_last_noise_dbspl = (uint8_t)calc_spl;
         }
 
         /* ==============================================================
@@ -745,38 +743,22 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(MCU_I_O_2_GPIO_Port, &GPIO_InitStruct);
 }
 
-/* USER CODE BEGIN 4 */
-// void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-// {
-//   // --- 1. Handle the IMU 100Hz Interrupt ---
-//   if (GPIO_Pin == IMU_IS_INT1_Pin) 
-//   {
-//       // Just set the flag and exit. Do not put I2C reads here!
-//       g_imu_fetch_flag = 1U;
-//       g_light_tick++;
-//   }
+void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf) {
+    if (hmdf->Instance == MDF1_Filter0) {
+        // The DMA finished grabbing the clean snapshot!
+        g_audio_ready_flag = 1U;
+    }
+}
 
-//   // --- 2. Handle the User Button ---
-//   if (GPIO_Pin == USER_BUTTON_Pin)
-//   {
-//     switch (current_state)
-//     {
-//       case STATE_IDLE:
-//         current_state = STATE_ACQUISITION;
-//         LED_On(LED_GREEN);
-//         break;
-//       case STATE_ACQUISITION:
-//         current_state = STATE_IDLE;
-//         LED_Off(LED_GREEN);
-//         break;
-//       case STATE_USB_CONNECTED:
-//         current_state = STATE_DOWNLOAD;
-//         break;
-//       default:
-//         break;
-//     }
-//   }
-// }
+static void MX_GPDMA1_Init(void)
+{
+  /* GPDMA1 Clock Enable */
+  __HAL_RCC_GPDMA1_CLK_ENABLE();
+
+  /* GPDMA1 interrupt initialization */
+  HAL_NVIC_SetPriority(GPDMA1_Channel0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
+}
 /* USER CODE END 4 */
 
 void Error_Handler(void)
@@ -785,10 +767,6 @@ void Error_Handler(void)
   while (1) {}
 }
 
-void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf) {
-    // The DMA finished grabbing the 64ms snapshot!
-    g_audio_ready_flag = 1U;
-}
 
 #ifdef USE_FULL_ASSERT
 void assert_failed(uint8_t *file, uint32_t line) {}
