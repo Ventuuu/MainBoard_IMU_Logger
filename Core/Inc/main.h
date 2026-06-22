@@ -73,8 +73,6 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 #define BLE_P0_0_GPIO_Port GPIOC
 #define BLE_P3_6_Pin GPIO_PIN_7
 #define BLE_P3_6_GPIO_Port GPIOC
-#define BLE_UART_RX_IND_Pin GPIO_PIN_8
-#define BLE_UART_RX_IND_GPIO_Port GPIOC
 #define BLE_RESET_Pin GPIO_PIN_9
 #define BLE_RESET_GPIO_Port GPIOC
 #define BLE_CONFIG_Pin GPIO_PIN_15
@@ -105,9 +103,5 @@ typedef enum {
 #ifdef __cplusplus
 }
 #endif
-
-/* USER CODE BEGIN ET */
-extern AppState current_state;
-/* USER CODE END ET */
 
 #endif /* __MAIN_H */
