@@ -86,8 +86,6 @@ I2C_HandleTypeDef hi2c3;
 
 MDF_HandleTypeDef MdfHandle0;
 MDF_FilterConfigTypeDef MdfFilterConfig0;
-DMA_NodeTypeDef Node_GPDMA1_Channel0;
-DMA_QListTypeDef List_GPDMA1_Channel0;
 DMA_HandleTypeDef handle_GPDMA1_Channel0;
 
 SPI_HandleTypeDef hspi2;
@@ -345,18 +343,13 @@ int main(void)
         }
 
         /* ==============================================================
-         * TASK 3: The 10-Second Microphone Wakeup (Timer Driven)
+         * TASK 3: The 2-Second Microphone Wakeup (Timer Driven)
          * ============================================================== */
-        if (current_tick - last_audio_check_ms >= 5000) {
+        if (current_tick - last_audio_check_ms >= 1900) {
             last_audio_check_ms = current_tick;
-            
-            // Give the Mic 10ms to stabilize
-            HAL_Delay(10);
-
             // 1. Configure the DMA transfer for this specific snapshot
             static MDF_DmaConfigTypeDef dma_config;
             dma_config.Address    = (uint32_t)s_pcm_buffer;
-            
             // Length in bytes: 256 samples * 2 bytes per int16 = 512 bytes
             dma_config.DataLength = PCM_FRAME_SIZE * 2;
             dma_config.MsbOnly    = DISABLE;
@@ -369,12 +362,12 @@ int main(void)
          * ============================================================== */
         if (g_audio_ready_flag) {
             g_audio_ready_flag = 0;
-
+            float calc_dbfs, calc_spl;
+            MicMetrics_ProcessFrame(s_pcm_buffer, PCM_FRAME_SIZE, &calc_dbfs, &calc_spl);
+            
             //Turn off the peripheral to save battery
             HAL_MDF_AcqStop_DMA(&MdfHandle0);
 
-            float calc_dbfs, calc_spl;
-            MicMetrics_ProcessFrame(s_pcm_buffer, PCM_FRAME_SIZE, &calc_dbfs, &calc_spl);
             
             g_last_noise_dbfs  = (int8_t)calc_dbfs;
             g_last_noise_dbspl = (uint8_t)calc_spl;
@@ -556,7 +549,30 @@ static void MX_GPDMA1_Init(void)
     HAL_NVIC_EnableIRQ(GPDMA1_Channel0_IRQn);
 
   /* USER CODE BEGIN GPDMA1_Init 1 */
+  handle_GPDMA1_Channel0.Instance = GPDMA1_Channel0;
+  handle_GPDMA1_Channel0.Init.Request = GPDMA1_REQUEST_MDF1_FLT0; 
+  handle_GPDMA1_Channel0.Init.BlkHWRequest = DMA_BREQ_SINGLE_BURST;
+  handle_GPDMA1_Channel0.Init.Direction = DMA_PERIPH_TO_MEMORY;
+  handle_GPDMA1_Channel0.Init.SrcInc = DMA_SINC_FIXED;
+  handle_GPDMA1_Channel0.Init.DestInc = DMA_DINC_INCREMENTED;
+  handle_GPDMA1_Channel0.Init.SrcDataWidth = DMA_SRC_DATAWIDTH_WORD;
+  handle_GPDMA1_Channel0.Init.DestDataWidth = DMA_DEST_DATAWIDTH_WORD;
+  handle_GPDMA1_Channel0.Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
+  handle_GPDMA1_Channel0.Init.SrcBurstLength = 1;
+  handle_GPDMA1_Channel0.Init.DestBurstLength = 1;
+  handle_GPDMA1_Channel0.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0|DMA_DEST_ALLOCATED_PORT0;
+  handle_GPDMA1_Channel0.Init.TransferEventMode = DMA_TCEM_BLOCK_TRANSFER;
+  handle_GPDMA1_Channel0.Init.Mode = DMA_NORMAL; 
 
+  if (HAL_DMA_Init(&handle_GPDMA1_Channel0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  
+  if (HAL_DMA_ConfigChannelAttributes(&handle_GPDMA1_Channel0, DMA_CHANNEL_NPRIV) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END GPDMA1_Init 1 */
   /* USER CODE BEGIN GPDMA1_Init 2 */
 
@@ -657,14 +673,12 @@ static void MX_MDF1_Init(void)
   MdfHandle0.Init.CommonParam.ProcClockDivider = 1;
   MdfHandle0.Init.CommonParam.OutputClock.Activation = ENABLE;
   MdfHandle0.Init.CommonParam.OutputClock.Pins = MDF_OUTPUT_CLOCK_0;
-  MdfHandle0.Init.CommonParam.OutputClock.Divider = 6;
-  MdfHandle0.Init.CommonParam.OutputClock.Trigger.Activation = ENABLE;
-  MdfHandle0.Init.CommonParam.OutputClock.Trigger.Source = MDF_CLOCK_TRIG_TRGO;
-  MdfHandle0.Init.CommonParam.OutputClock.Trigger.Edge = MDF_CLOCK_TRIG_FALLING_EDGE;
+  MdfHandle0.Init.CommonParam.OutputClock.Divider = 5;
+  MdfHandle0.Init.CommonParam.OutputClock.Trigger.Activation = DISABLE;
   MdfHandle0.Init.SerialInterface.Activation = ENABLE;
-  MdfHandle0.Init.SerialInterface.Mode = MDF_SITF_NORMAL_SPI_MODE;
+  MdfHandle0.Init.SerialInterface.Mode = MDF_SITF_LF_MASTER_SPI_MODE;
   MdfHandle0.Init.SerialInterface.ClockSource = MDF_SITF_CCK0_SOURCE;
-  MdfHandle0.Init.SerialInterface.Threshold = 31;
+  MdfHandle0.Init.SerialInterface.Threshold = 4;
   MdfHandle0.Init.FilterBistream = MDF_BITSTREAM0_RISING;
   if (HAL_MDF_Init(&MdfHandle0) != HAL_OK)
   {
@@ -681,19 +695,18 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.CicMode = MDF_ONE_FILTER_SINC5;
   MdfFilterConfig0.DecimationRatio = 16;
   MdfFilterConfig0.Offset = 0;
-  MdfFilterConfig0.Gain = 1;
+  MdfFilterConfig0.Gain = 0;
   MdfFilterConfig0.ReshapeFilter.Activation = ENABLE;
   MdfFilterConfig0.ReshapeFilter.DecimationRatio = MDF_RSF_DECIMATION_RATIO_4;
   MdfFilterConfig0.HighPassFilter.Activation = ENABLE;
   MdfFilterConfig0.HighPassFilter.CutOffFrequency = MDF_HPF_CUTOFF_0_000625FPCM;
   MdfFilterConfig0.Integrator.Activation = DISABLE;
   MdfFilterConfig0.SoundActivity.Activation = DISABLE;
-  MdfFilterConfig0.AcquisitionMode = MDF_MODE_SYNC_CONT;
+  MdfFilterConfig0.AcquisitionMode = MDF_MODE_ASYNC_CONT;
   MdfFilterConfig0.FifoThreshold = MDF_FIFO_THRESHOLD_NOT_EMPTY;
   MdfFilterConfig0.DiscardSamples = 255;
-  MdfFilterConfig0.Trigger.Source = MDF_CLOCK_TRIG_TRGO;
-  MdfFilterConfig0.Trigger.Edge = MDF_FILTER_TRIG_RISING_EDGE;
   /* USER CODE BEGIN MDF1_Init 2 */
+  __HAL_LINKDMA(&MdfHandle0, hdma, handle_GPDMA1_Channel0);
 
   /* USER CODE END MDF1_Init 2 */
 
