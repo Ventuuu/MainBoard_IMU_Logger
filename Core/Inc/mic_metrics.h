@@ -8,5 +8,5 @@
  * Returns negative values for dBFS (e.g., -40.0 dBFS) and positive values for dBSPL (e.g., 65.0 dBSPL).
  * 0 dBFS is the absolute maximum clipping point of the hardware.
  */
-void MicMetrics_ProcessFrame(int16_t* pcm_data, uint16_t length, float* out_dbfs, float* out_dbspl);
+void MicMetrics_ProcessFrame(int32_t* pcm_data, uint16_t length, float* out_dbfs, float* out_dbspl);
 #endif /* __MIC_METRICS_H */

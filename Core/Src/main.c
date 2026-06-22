@@ -123,7 +123,7 @@ static volatile uint8_t g_light_tick      = 0U;
 
 // --- Intermittent Audio Snapshot Buffer ---
 #define PCM_FRAME_SIZE 256 
-int16_t s_pcm_buffer[PCM_FRAME_SIZE];
+int32_t s_pcm_buffer[PCM_FRAME_SIZE];
 
 volatile uint8_t g_audio_ready_flag = 0;
 int8_t  g_last_noise_dbfs = -100;
@@ -351,7 +351,7 @@ int main(void)
             static MDF_DmaConfigTypeDef dma_config;
             dma_config.Address    = (uint32_t)s_pcm_buffer;
             // Length in bytes: 256 samples * 2 bytes per int16 = 512 bytes
-            dma_config.DataLength = PCM_FRAME_SIZE * 2;
+            dma_config.DataLength = PCM_FRAME_SIZE * 4;
             dma_config.MsbOnly    = DISABLE;
             
             HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
@@ -695,7 +695,7 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.CicMode = MDF_ONE_FILTER_SINC5;
   MdfFilterConfig0.DecimationRatio = 16;
   MdfFilterConfig0.Offset = 0;
-  MdfFilterConfig0.Gain = 0;
+  MdfFilterConfig0.Gain = 1;
   MdfFilterConfig0.ReshapeFilter.Activation = ENABLE;
   MdfFilterConfig0.ReshapeFilter.DecimationRatio = MDF_RSF_DECIMATION_RATIO_4;
   MdfFilterConfig0.HighPassFilter.Activation = ENABLE;
