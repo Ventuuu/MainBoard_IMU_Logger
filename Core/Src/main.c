@@ -153,7 +153,7 @@ static void MX_MDF1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
-
+static void MX_GPDMA1_Init(void);
 /* ============================================================
  * USER CODE BEGIN 0
  *
@@ -199,6 +199,7 @@ int main(void)
   MX_TIM2_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
+  MX_GPDMA1_Init();
 
   /* USER CODE BEGIN 2 */
   //LED_On(LED_RED);
@@ -334,17 +335,17 @@ int main(void)
             HAL_Delay(10);
             
             // Start the DMA capture in the background
-            // MDF_DmaConfigTypeDef dma_config;
-            // dma_config.Address    = (uint32_t)g_audio_buffer;
+            MDF_DmaConfigTypeDef dma_config;
+            dma_config.Address    = (uint32_t)g_audio_buffer;
             
-            // // DataLength expects the size in bytes. 
-            // // 1024 int16_t samples * 2 bytes per sample = 2048 bytes.
-            // dma_config.DataLength = AUDIO_CHUNK_SIZE * 2; 
+            // DataLength expects the size in bytes. 
+            // 1024 int16_t samples * 2 bytes per sample = 2048 bytes.
+            dma_config.DataLength = AUDIO_CHUNK_SIZE * 2; 
             
-            // dma_config.MsbOnly    = DISABLE; // Keep full 16-bit resolution
+            dma_config.MsbOnly    = DISABLE; // Keep full 16-bit resolution
             
-            // Start the DMA capture in the background using the struct
-            // HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
+            //Start the DMA capture in the background using the struct
+            HAL_MDF_AcqStart_DMA(&MdfHandle0, &MdfFilterConfig0, &dma_config);
         }
 
         /* ==============================================================
@@ -356,8 +357,8 @@ int main(void)
             float noise_dbspl = MicMetrics_CalculateNoise_dBSPL(g_audio_buffer, AUDIO_CHUNK_SIZE);
             float noise_dbfs  = MicMetrics_CalculateNoise_dBFS(g_audio_buffer, AUDIO_CHUNK_SIZE);
             
-            // Turn off the peripheral to save battery
-            // HAL_MDF_AcqStop_DMA(&MdfHandle0);
+            Turn off the peripheral to save battery
+            HAL_MDF_AcqStop_DMA(&MdfHandle0);
             
             g_last_noise_dbfs  = (int8_t)noise_dbfs;
             g_last_noise_dbspl = (uint8_t)noise_dbspl;
