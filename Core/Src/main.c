@@ -9,8 +9,8 @@
   * @details        : The application operates using a State Machine triggered by a
   * single USER BUTTON. It performs three primary tasks:
  * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data from the LSM6DSO16IS
- *    via I2C at 100 Hz (TIM2), and computes a final AS7341 session-level
- *    light result outside interrupt context.
+ *    via I2C at 100 Hz (TIM2), and stores raw AS7341 samples as LRAW pages
+ *    outside interrupt context.
   * 2. Wireless Transmission: Sends data packets via Bluetooth Low Energy (BLE)
   *    using the UART interface.
   * 3. Data Logging: Saves acquired data to NAND Flash memory.
@@ -38,7 +38,7 @@
 #include "imu_driver.h"
 #include "bluetooth.h"
 #include "as7341_driver.h"
-#include "light_metrics_mcu.h"
+#include "as7341_processing_config.h"
 
 /* USER CODE END Includes */
 
@@ -77,6 +77,8 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 //--- Microphone acquisition variables ---
 #define AUDIO_BUFFER_SIZE 1024U
+#define LIGHT_SUBSAMPLE_TICKS 8U
+#define USER_BUTTON_DEBOUNCE_MS 250U
 
 int16_t audio_buffer[AUDIO_BUFFER_SIZE];
 MDF_DmaConfigTypeDef mic_dma_config;
@@ -94,8 +96,15 @@ static uint8_t state_led_initialized = 0U;
 volatile uint8_t usb_flag = 0U;
 static volatile uint8_t start_acquisition_requested = 0U;
 static volatile uint8_t stop_acquisition_requested = 0U;
+static volatile uint8_t download_requested = 0U;
 static volatile uint32_t sensor_tick_pending = 0U;
-static volatile uint8_t light_finalize_pending = 0U;
+static volatile uint32_t user_button_last_event_ms = 0U;
+
+volatile uint32_t button_rising_count = 0U;
+volatile uint32_t start_request_count = 0U;
+volatile uint32_t stop_request_count = 0U;
+volatile uint32_t download_request_count = 0U;
+volatile AppState debug_state_at_button = STATE_IDLE;
 
 // --- IMU data ---
 static IMU_Data accelerometer_data;
@@ -106,11 +115,21 @@ uint8_t raw_gyroscope[6]     = {0};
 
 /*
  * raw_light layout (22 bytes):
- *   Legacy AS7341 area in the 40-byte IMU record. The new light pipeline keeps
- *   this area zero-filled and writes one final LOG_MAGIC_LIGHT page instead.
+ *   Legacy AS7341 area in the 40-byte IMU record. The raw-count pipeline keeps
+ *   this area zero-filled and writes dedicated LOG_MAGIC_LIGHT_RAW pages.
  */
 uint8_t raw_light[22] = {0};
-static LightSensorResultRecord light_result;
+
+static AS7341_Spectrum light_spectrum;
+static uint8_t as7341_available = 0U;
+static uint8_t light_subsample_tick = 0U;
+static uint32_t light_session_start_ms = 0U;
+static uint32_t light_sample_index = 0U;
+
+volatile uint32_t light_samples_requested = 0U;
+volatile uint32_t light_samples_acquired = 0U;
+volatile uint32_t light_samples_saved = 0U;
+volatile uint32_t light_samples_discarded = 0U;
 
 /// ----- NAND FLASH variables ----- ///
 
@@ -136,6 +155,7 @@ static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
 /* USER CODE BEGIN PFP */
 static void UpdateStateLed(AppState state);
+static LogStatus AcquireAndStoreLightRawSample(void);
 
 /* USER CODE END PFP */
 
@@ -241,6 +261,7 @@ void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 static void StopAcquisition(void)
 {
     uint32_t stop_ms = HAL_GetTick();
+    LogStatus flush_status;
 
     HAL_TIM_Base_Stop_IT(&htim2);
 
@@ -253,11 +274,65 @@ static void StopAcquisition(void)
     audio_buffer_ready = 0U;
     sensor_tick_pending = 0U;
     stop_acquisition_requested = 0U;
-    LightMetrics_StopSession(stop_ms);
-    light_finalize_pending = 1U;
 
     current_state = STATE_IDLE;
     UpdateStateLed(current_state);
+
+    flush_status = NANDLogger_FlushAll(&nand_logger, stop_ms);
+    if (flush_status != LOG_OK)
+    {
+        LED_On(LED_RED);
+    }
+}
+
+static LogStatus AcquireAndStoreLightRawSample(void)
+{
+    LightRawSampleRecord record;
+    LogStatus status;
+    uint32_t now_ms;
+
+    light_samples_requested++;
+
+    if (as7341_available == 0U)
+    {
+        light_samples_discarded++;
+        return LOG_OK;
+    }
+
+    if (AS7341_ReadFullSpectrum(&light_spectrum) != 1U)
+    {
+        light_samples_discarded++;
+        LED_On(LED_RED);
+        return LOG_OK;
+    }
+
+    light_samples_acquired++;
+
+    now_ms = HAL_GetTick();
+    record.sample_elapsed_ms = now_ms - light_session_start_ms;
+    record.sample_index = light_sample_index;
+    record.f1_counts = light_spectrum.ch[0];
+    record.f2_counts = light_spectrum.ch[1];
+    record.f3_counts = light_spectrum.ch[2];
+    record.f4_counts = light_spectrum.ch[3];
+    record.f5_counts = light_spectrum.ch[4];
+    record.f6_counts = light_spectrum.ch[5];
+    record.f7_counts = light_spectrum.ch[6];
+    record.f8_counts = light_spectrum.ch[7];
+    record.clear_counts = light_spectrum.ch[8];
+    record.nir_counts = light_spectrum.ch[9];
+
+    status = NANDLogger_AppendLightRawRecord(&nand_logger, &record, now_ms);
+    if (status != LOG_OK)
+    {
+        light_samples_discarded++;
+        return status;
+    }
+
+    light_sample_index++;
+    light_samples_saved++;
+
+    return LOG_OK;
 }
 
 static void ProcessSensorTick(void)
@@ -266,7 +341,18 @@ static void ProcessSensorTick(void)
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
     IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
 
-    LightMetrics_RequestSample();
+    light_subsample_tick++;
+    if (light_subsample_tick >= LIGHT_SUBSAMPLE_TICKS)
+    {
+        light_subsample_tick = 0U;
+
+        if (AcquireAndStoreLightRawSample() != LOG_OK)
+        {
+            StopAcquisition();
+            LED_On(LED_RED);
+            return;
+        }
+    }
 
     /* --- BLE transmission --- */
     BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
@@ -377,14 +463,17 @@ MX_SPI3_Init();
   if (AS7341_Init() != 1) {
     /* Light sensor not found or failed: blink RED 3x quickly to warn,
      * but continue running (IMU logging still works). */
+    as7341_available = 0U;
     for (uint8_t i = 0; i < 3; i++) {
       LED_Toggle(LED_RED); HAL_Delay(150);
       LED_Toggle(LED_RED); HAL_Delay(150);
     }
+  } else {
+    as7341_available = 1U;
+    AS7341_ConfigTimingAndGain(AS7341_PROCESSING_ATIME,
+                               AS7341_PROCESSING_ASTEP,
+                               AS7341_PROCESSING_GAIN);
   }
-
-  /* Configure AS7341 timing/gain and reset session accumulators. */
-  LightMetrics_Init();
 
   LED_Off(LED_RED);
 
@@ -406,21 +495,6 @@ MX_SPI3_Init();
 	  {
       case STATE_IDLE:
 
-        if (light_finalize_pending)
-        {
-          light_finalize_pending = 0U;
-          LightMetrics_FinalizeSession(&light_result);
-
-          if (NANDLogger_AppendLightResult(&nand_logger,
-                                           &light_result,
-                                           HAL_GetTick()) != LOG_OK)
-          {
-            LED_On(LED_RED);
-          }
-
-          LightMetrics_ResetSession();
-        }
-
         if (start_acquisition_requested)
         {
           start_acquisition_requested = 0U;
@@ -437,7 +511,13 @@ MX_SPI3_Init();
           tim = 0U;
           sensor_tick_pending = 0U;
           memset(raw_light, 0, sizeof(raw_light));
-          LightMetrics_StartSession(HAL_GetTick());
+          light_subsample_tick = 0U;
+          light_session_start_ms = HAL_GetTick();
+          light_sample_index = 0U;
+          light_samples_requested = 0U;
+          light_samples_acquired = 0U;
+          light_samples_saved = 0U;
+          light_samples_discarded = 0U;
 
           audio_buffer_ready = 0U;
           microphone_active = 0U;
@@ -483,12 +563,6 @@ MX_SPI3_Init();
              ProcessSensorTick();
           }
 
-          if ((current_state == STATE_ACQUISITION) &&
-              (stop_acquisition_requested == 0U))
-          {
-            LightMetrics_ProcessPendingSample();
-          }
-
           if (stop_acquisition_requested)
           {
             stop_acquisition_requested = 0U;
@@ -524,6 +598,11 @@ MX_SPI3_Init();
           break;
 
 	  	  case STATE_USB_CONNECTED:
+          if (download_requested)
+          {
+            download_requested = 0U;
+            current_state = STATE_DOWNLOAD;
+          }
 	  		 break;
 
 	  	  case STATE_DOWNLOAD:
@@ -563,25 +642,42 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
-	if(GPIO_Pin == USER_BUTTON_Pin)
-  {
-		switch(current_state) 
+    uint32_t now;
+
+	if(GPIO_Pin != USER_BUTTON_Pin)
     {
-			case STATE_IDLE:
+        return;
+    }
+
+    now = HAL_GetTick();
+
+    if ((now - user_button_last_event_ms) < USER_BUTTON_DEBOUNCE_MS)
+    {
+        return;
+    }
+
+    user_button_last_event_ms = now;
+    button_rising_count++;
+    debug_state_at_button = current_state;
+
+    switch(current_state)
+    {
+        case STATE_IDLE:
         start_acquisition_requested = 1U;
+        start_request_count++;
         break;
-			case STATE_ACQUISITION:
+        case STATE_ACQUISITION:
         stop_acquisition_requested = 1U;
+        stop_request_count++;
         break;
-			case STATE_USB_CONNECTED:
-				exit_flag = 0;
-				current_state = STATE_DOWNLOAD;
-			  break;
-			default:
-        current_state = STATE_IDLE;
-			  break;
-		}
-  }
+        case STATE_USB_CONNECTED:
+        exit_flag = 0;
+        download_requested = 1U;
+        download_request_count++;
+        break;
+        default:
+        break;
+    }
 }
 
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
@@ -1103,7 +1199,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : USER_BUTTON_Pin */
   GPIO_InitStruct.Pin = USER_BUTTON_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(USER_BUTTON_GPIO_Port, &GPIO_InitStruct);
 

@@ -16,7 +16,6 @@
 #include "SPI_NAND.h"
 
 #include "led_driver.h"
-#include "light_metrics_mcu.h"
 
 /*
  * Packet layout per sample (STRIDE_BYTES_PER_SAMPLE = 40, effective BYTES_PER_SAMPLE = 40):
@@ -84,25 +83,14 @@ typedef enum
 #define LOG_SENSOR_PAYLOAD_BYTES (NAND_PAGE_SIZE_BYTES - LOG_HEADER_SIZE_BYTES)
 #define LOG_SENSOR_RECORD_BYTES  40U
 #define LOG_SENSOR_RECORDS_PER_PAGE (LOG_SENSOR_PAYLOAD_BYTES / LOG_SENSOR_RECORD_BYTES)
+#define LOG_LIGHT_RAW_RECORD_BYTES 28U
+#define LOG_LIGHT_RAW_RECORDS_PER_PAGE (LOG_SENSOR_PAYLOAD_BYTES / LOG_LIGHT_RAW_RECORD_BYTES)
+#define LOG_LIGHT_RAW_MAX_PAYLOAD_BYTES (LOG_LIGHT_RAW_RECORDS_PER_PAGE * LOG_LIGHT_RAW_RECORD_BYTES)
+#define LOG_LIGHT_RAW_PADDING_BYTES (LOG_SENSOR_PAYLOAD_BYTES - LOG_LIGHT_RAW_MAX_PAYLOAD_BYTES)
 
 #define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
 #define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
-#define LOG_MAGIC_LIGHT  0x4554494CUL  /* 'LITE' */
-
-
-#define NAND_TOTAL_BLOCKS        2048U
-#define NAND_PAGES_PER_BLOCK     64U
-#define NAND_PAGE_SIZE_BYTES     4096U
-
-#define LOG_HEADER_SIZE_BYTES    16U
-#define LOG_SENSOR_PAYLOAD_BYTES (NAND_PAGE_SIZE_BYTES - LOG_HEADER_SIZE_BYTES)
-#define LOG_SENSOR_RECORD_BYTES  40U
-#define LOG_SENSOR_RECORDS_PER_PAGE (LOG_SENSOR_PAYLOAD_BYTES / LOG_SENSOR_RECORD_BYTES)
-
-#define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
-#define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
-#define LOG_MAGIC_LIGHT  0x4554494CUL  /* 'LITE' */
-
+#define LOG_MAGIC_LIGHT_RAW 0x5741524CUL  /* 'LRAW' */
 
 typedef struct __attribute__((packed))
 {
@@ -114,6 +102,24 @@ typedef struct __attribute__((packed))
     uint32_t timestamp_ms;
 } LogPageHeader;
 
+typedef struct __attribute__((packed))
+{
+    uint32_t sample_elapsed_ms;
+    uint32_t sample_index;
+    uint16_t f1_counts;
+    uint16_t f2_counts;
+    uint16_t f3_counts;
+    uint16_t f4_counts;
+    uint16_t f5_counts;
+    uint16_t f6_counts;
+    uint16_t f7_counts;
+    uint16_t f8_counts;
+    uint16_t clear_counts;
+    uint16_t nir_counts;
+} LightRawSampleRecord;
+
+_Static_assert(sizeof(LightRawSampleRecord) == LOG_LIGHT_RAW_RECORD_BYTES,
+               "Unexpected LightRawSampleRecord size");
 
 typedef struct
 {
@@ -127,6 +133,17 @@ typedef struct
 
     uint8_t sensor_page_buffer[NAND_PAGE_SIZE_BYTES];
     uint16_t sensor_records_in_page;
+
+    uint8_t light_raw_page_buffer[NAND_PAGE_SIZE_BYTES];
+    uint16_t light_raw_records_in_page;
+    uint16_t light_raw_payload_bytes;
+
+    uint32_t light_pages_written;
+    uint32_t light_partial_pages_flushed;
+    uint32_t light_full_pages_flushed;
+    uint32_t light_nand_write_failures;
+    uint32_t light_nand_verify_failures;
+    uint32_t light_payload_consistency_failures;
 } NandLogger;
 
 
@@ -145,12 +162,17 @@ LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
                                        uint32_t audio_samples,
                                        uint32_t timestamp_ms);
 
-LogStatus NANDLogger_AppendLightResult(NandLogger *logger,
-                                       const LightSensorResultRecord *result,
-                                       uint32_t timestamp_ms);
+LogStatus NANDLogger_AppendLightRawRecord(NandLogger *logger,
+                                          const LightRawSampleRecord *record,
+                                          uint32_t timestamp_ms);
 
 LogStatus NANDLogger_DownloadAll(NandLogger *logger);
 LogStatus NANDLogger_Flush(NandLogger *logger, uint32_t timestamp_ms);
+LogStatus NANDLogger_FlushLightRaw(NandLogger *logger, uint32_t timestamp_ms);
+LogStatus NANDLogger_FlushAll(NandLogger *logger, uint32_t timestamp_ms);
+
+void NANDLogger_SerializeLightRawRecordForTest(uint8_t *dst,
+                                               const LightRawSampleRecord *record);
 
 
 #endif /* INC_MEMORY_OPERATIONS_H_ */

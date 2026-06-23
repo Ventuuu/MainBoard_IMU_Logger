@@ -1,5 +1,10 @@
 # AS7341 Light Pipeline Changes
 
+> Superseded: the active firmware pipeline now writes AS7341 raw-count time
+> series pages with magic `LRAW`. See `AS7341_RAW_COUNTS_PIPELINE.md` for the
+> implemented behavior. The historical `LITE` session-result pipeline described
+> below is no longer called from `main.c`.
+
 ## Files modified
 
 - `Core/Src/main.c`

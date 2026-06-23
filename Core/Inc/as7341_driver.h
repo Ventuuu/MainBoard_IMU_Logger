@@ -98,9 +98,11 @@ typedef struct {
 /**
  * @brief Container for a full spectral frame (F1–F8, Clear, NIR).
  *
- * Ordering matches Adafruit convention when using two SMUX configurations:
- *   low:  F1,F2,F3,F4,Clear,NIR  (ch[0..5])
- *   high: F5,F6,F7,F8,Clear,NIR  (ch[6..11])
+ * Public ordering used by the raw logger:
+ *   ch[0..7]  = F1,F2,F3,F4,F5,F6,F7,F8
+ *   ch[8]     = Clear, averaged from the two SMUX phases
+ *   ch[9]     = NIR, averaged from the two SMUX phases
+ *   ch[10..11] keep the unaveraged high-phase Clear/NIR for diagnostics.
  */
 typedef struct {
     uint16_t ch[12];
@@ -129,7 +131,7 @@ void AS7341_ConfigTimingAndGain(uint8_t atime, uint16_t astep, AS7341_Gain gain)
 uint8_t AS7341_ReadSixChannels(uint16_t *dst6);
 
 /**
- * @brief Reads a full spectral frame (12 channels: F1–F8, Clear, NIR) using
+ * @brief Reads a full spectral frame (F1–F8, Clear, NIR) using
  *        two SMUX configurations (low and high) inspired by Adafruit.
  *
  * This call is blocking and may take roughly 2× the integration time.
