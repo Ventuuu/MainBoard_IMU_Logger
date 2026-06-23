@@ -24,6 +24,7 @@
 #define AS7341_REG_ASTEP_H      0xCBU
 #define AS7341_REG_AGAIN        0xAAU
 #define AS7341_REG_STATUS       0x93U
+#define AS7341_REG_ASTATUS      0x94U  /* Required for 16-bit concurrent latching */
 #define AS7341_REG_STATUS2      0xA3U
 #define AS7341_REG_CFG0         0xA9U
 #define AS7341_REG_CFG1         0xAAU
@@ -63,6 +64,17 @@
 /* CFG0: set bit4=1 to access register bank 0x60–0x74 (SMUX RAM etc.) */
 #define AS7341_REG_BANK_ACCESS  0x10U
 
+/* Flicker Status Bits */
+#define AS7341_FD_STAT_VALID        (1 << 5) // Measurement is valid
+#define AS7341_FD_STAT_SAT          (1 << 4) // Saturation occurred (invalid data)
+#define AS7341_FD_STAT_120HZ_VALID  (1 << 3) // 120Hz calculation is valid
+#define AS7341_FD_STAT_100HZ_VALID  (1 << 2) // 100Hz calculation is valid
+#define AS7341_FD_STAT_120HZ        (1 << 1) // 120Hz Flicker Detected
+#define AS7341_FD_STAT_100HZ        (1 << 0) // 100Hz Flicker Detected
+
+// Common combined states:
+#define AS7341_FD_BASE_VALID (AS7341_FD_STAT_VALID | AS7341_FD_STAT_120HZ_VALID | AS7341_FD_STAT_100HZ_VALID)
+
 /* CFG6 SMUX command bits (lower 2 bits) */
 typedef enum {
     AS7341_SMUX_CMD_ROM_RESET = 0,
@@ -97,14 +109,19 @@ typedef struct {
 
 /**
  * @brief Container for a full spectral frame (F1–F8, Clear, NIR).
- *
- * Ordering matches Adafruit convention when using two SMUX configurations:
- *   low:  F1,F2,F3,F4,Clear,NIR  (ch[0..5])
- *   high: F5,F6,F7,F8,Clear,NIR  (ch[6..11])
  */
 typedef struct {
-    uint16_t ch[12];
-} AS7341_Spectrum;
+    uint16_t f1;    // 415nm
+    uint16_t f2;    // 445nm
+    uint16_t f3;    // 480nm
+    uint16_t f4;    // 515nm
+    uint16_t f5;    // 555nm
+    uint16_t f6;    // 590nm
+    uint16_t f7;    // 630nm
+    uint16_t f8;    // 680nm
+    uint16_t clear; // Non-filtered silicon response
+    uint16_t nir;   // Near-infrared channel
+} AS7341_FullSpectrumData;
 
 /* ---- Public Function Prototypes ----------------------------------------- */
 
@@ -112,41 +129,41 @@ uint8_t AS7341_Init(void);
 
 /**
  * @brief Legacy helper: reads Clear and NIR channels only.
- *        Kept for backward compatibility with BYTES_PER_SAMPLE = 21.
+ * Kept for backward compatibility with BYTES_PER_SAMPLE = 21.
  */
 void AS7341_ReadChannels(AS7341_Data *light_data, uint8_t *raw_data);
 
 /**
  * @brief Configure integration time and gain in a higher-level way.
- *        Thin wrapper around ATIME/ASTEP/AGAIN registers.
+ * Thin wrapper around ATIME/ASTEP/AGAIN registers.
  */
 void AS7341_ConfigTimingAndGain(uint8_t atime, uint16_t astep, AS7341_Gain gain);
 
 /**
  * @brief Blocking helper that reads all 6 CHx registers into an array.
- *        Used internally by the full-spectrum API.
+ * Used internally by the full-spectrum API.
  */
 uint8_t AS7341_ReadSixChannels(uint16_t *dst6);
 
 /**
  * @brief Reads a full spectral frame (12 channels: F1–F8, Clear, NIR) using
- *        two SMUX configurations (low and high) inspired by Adafruit.
+ * two SMUX configurations (low and high) inspired by Adafruit.
  *
  * This call is blocking and may take roughly 2× the integration time.
  *
- * @param[out] spectrum  Pointer to AS7341_Spectrum struct to fill.
+ * @param[out] data  Pointer to AS7341_FullSpectrumData struct to fill.
  * @return 1 on success, 0 on error/timeout.
  */
-uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum);
+uint8_t AS7341_ReadFullSpectrum(AS7341_FullSpectrumData *data);
 
 /**
  * @brief Runs the on-chip flicker engine and returns an equivalent mains
- *        frequency classification.
+ * frequency classification.
  *
  * Return value:
- *   0  -> no mains flicker detected / unknown
- *   50 -> 100 Hz flicker (50 Hz mains)
- *   60 -> 120 Hz flicker (60 Hz mains)
+ * 0  -> no mains flicker detected / unknown
+ * 50 -> 100 Hz flicker (50 Hz mains)
+ * 60 -> 120 Hz flicker (60 Hz mains)
  */
 uint16_t AS7341_DetectMainsHz(void);
 

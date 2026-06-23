@@ -26,10 +26,26 @@ static void    as7341_smux_setup_F5F8_Clear_NIR(void);
 static void    as7341_smux_setup_FlickerPD(void);
 static uint16_t as7341_decode_flicker_mains(uint8_t fd_status);
 
+typedef struct {
+    uint16_t f1;    // 415nm
+    uint16_t f2;    // 445nm
+    uint16_t f3;    // 480nm
+    uint16_t f4;    // 515nm
+    uint16_t f5;    // 555nm
+    uint16_t f6;    // 590nm
+    uint16_t f7;    // 630nm
+    uint16_t f8;    // 680nm
+    uint16_t clear; // Non-filtered silicon response
+    uint16_t nir;   // Near-infrared channel
+    uint16_t fd_status; // Flicker detection status
+} AS7341_FullSpectrumData;
+
 /* ---- Public Function Implementations ------------------------------------ */
 
 uint8_t AS7341_Init(void) {
     uint8_t id = 0;
+
+    HAL_Delay(1);
 
     /* WHOAMI/ID check: register 0x92 should return 0x09 (Adafruit) or 0x24 w/ rev bits. */
     if (!as7341_read_register(0x92U, &id, 1)) {
@@ -64,6 +80,19 @@ void AS7341_ConfigTimingAndGain(uint8_t atime, uint16_t astep, AS7341_Gain gain)
     as7341_write_register(AS7341_REG_AGAIN, (uint8_t)gain);
 }
 
+static uint8_t as7341_enable_spectral_measurement(uint8_t enable) {
+    uint8_t reg = 0;
+    if (!as7341_read_register(AS7341_REG_ENABLE, &reg, 1)) return 0;
+    
+    if (enable) {
+        reg |= AS7341_SP_EN;
+    } else {
+        reg &= (uint8_t)~AS7341_SP_EN;
+    }
+    
+    return as7341_write_register(AS7341_REG_ENABLE, reg);
+}
+
 void AS7341_ReadChannels(AS7341_Data *light_data, uint8_t *raw_data) {
     uint8_t buf[4] = {0};
 
@@ -71,9 +100,8 @@ void AS7341_ReadChannels(AS7341_Data *light_data, uint8_t *raw_data) {
         return; /* timeout: leave previous values */
     }
 
-    /* Default high-channel map: CH2=Clear, CH3=NIR */
-    if (!as7341_read_register(AS7341_REG_CH2_L, &buf[0], 2U)) return;
-    if (!as7341_read_register(AS7341_REG_CH3_L, &buf[2], 2U)) return;
+    /* Single burst read for CH2 (Clear) and CH3 (NIR) */
+    if (!as7341_read_register(AS7341_REG_CH2_L, buf, 4U)) return;
 
     raw_data[0] = buf[0];
     raw_data[1] = buf[1];
@@ -85,51 +113,89 @@ void AS7341_ReadChannels(AS7341_Data *light_data, uint8_t *raw_data) {
 }
 
 uint8_t AS7341_ReadSixChannels(uint16_t *dst6) {
-    uint8_t buf[12];
+    uint8_t buf[13]; // 1 byte for ASTATUS + 12 bytes for CH0-CH5
 
     if (!as7341_wait_avalid(50U)) {
         return 0;
     }
 
-    if (!as7341_read_register(AS7341_REG_CH0_L, buf, sizeof(buf))) {
+    // Start read at ASTATUS (0x94) to lock all 6 ADCs in time
+    if (!as7341_read_register(AS7341_REG_ASTATUS, buf, sizeof(buf))) {
         return 0;
     }
 
+    // Parse the 12 data bytes, offset by 1 to skip buf[0] (ASTATUS)
     for (uint8_t i = 0; i < 6; i++) {
-        uint8_t l = buf[2U * i];
-        uint8_t h = buf[2U * i + 1U];
+        uint8_t l = buf[1U + (2U * i)];
+        uint8_t h = buf[2U + (2U * i)];
         dst6[i] = (uint16_t)((h << 8) | l);
     }
 
     return 1;
 }
 
-uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum) {
-    uint16_t tmp[6];
+uint8_t AS7341_ReadFullSpectrum(AS7341_FullSpectrumData *data) {
+    uint16_t adc_values[6];
 
-    if (spectrum == NULL) return 0;
+    if (data == NULL) return 0;
 
-    /* --- Low channels: F1–F4 + Clear + NIR --- */
+    /* ==========================================
+       PASS 1: Read F1, F2, F3, F4, Clear
+       ========================================== */
+    // 1. Stop the current integration
+    if (!as7341_enable_spectral_measurement(0)) return 0;
+
+    // 2. Map SMUX to Low Channels
     as7341_select_regbank(1U);
     as7341_smux_setup_F1F4_Clear_NIR();
     as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
     as7341_select_regbank(0U);
 
-    if (!AS7341_ReadSixChannels(tmp)) return 0;
-    for (uint8_t i = 0; i < 6; i++) {
-        spectrum->ch[i] = tmp[i];
-    }
+    // 3. Start a fresh integration cycle
+    if (!as7341_enable_spectral_measurement(1)) return 0;
 
-    /* --- High channels: F5–F8 + Clear + NIR --- */
+    // 4. Wait for the cycle to complete (min 50ms based on your init settings)
+    if (!as7341_wait_avalid(100U)) return 0;
+
+    // 5. Burst read ASTATUS + CH0 to CH5
+    if (!AS7341_ReadSixChannels(adc_values)) return 0;
+
+    // Map ADC0-ADC4 to the struct
+    data->f1    = adc_values[0];
+    data->f2    = adc_values[1];
+    data->f3    = adc_values[2];
+    data->f4    = adc_values[3];
+    data->clear = adc_values[4]; // Clear is routed to ADC4 in this SMUX setup
+
+    /* ==========================================
+       PASS 2: Read F5, F6, F7, F8, (Clear)
+       ========================================== */
+    // 1. Stop integration again
+    if (!as7341_enable_spectral_measurement(0)) return 0;
+
+    // 2. Map SMUX to High Channels
     as7341_select_regbank(1U);
     as7341_smux_setup_F5F8_Clear_NIR();
     as7341_smux_apply(AS7341_SMUX_CMD_WRITE);
     as7341_select_regbank(0U);
 
-    if (!AS7341_ReadSixChannels(tmp)) return 0;
-    for (uint8_t i = 0; i < 6; i++) {
-        spectrum->ch[6U + i] = tmp[i];
-    }
+    // 3. Start a fresh integration cycle
+    if (!as7341_enable_spectral_measurement(1)) return 0;
+
+    // 4. Wait for the cycle to complete
+    if (!as7341_wait_avalid(100U)) return 0;
+
+    // 5. Burst read ASTATUS + CH0 to CH5
+    if (!AS7341_ReadSixChannels(adc_values)) return 0;
+
+    // Map ADC0-ADC3 to the struct
+    data->f5 = adc_values[0];
+    data->f6 = adc_values[1];
+    data->f7 = adc_values[2];
+    data->f8 = adc_values[3];
+    
+    // Note: We skip adc_values[4] here because we already grabbed the Clear 
+    // channel from the first pass.
 
     return 1;
 }
@@ -327,13 +393,21 @@ static void as7341_smux_setup_FlickerPD(void) {
  * 120 Hz, or unknown flicker types, mirroring Adafruit's
  * Adafruit_AS7341::decodeFlickerDetectStatus behavior. */
 static uint16_t as7341_decode_flicker_mains(uint8_t fd_status) {
-    switch (fd_status) {
-        case 45: /* 100 Hz flicker detected */
-            return 50U;  /* 50 Hz mains */
-        case 46: /* 120 Hz flicker detected */
-            return 60U;  /* 60 Hz mains */
-        case 44: /* flicker, unknown frequency */
-        default:
-            return 0U;   /* treat as natural / non-mains */
+    /* If saturated or not valid, return unknown */
+    if ((fd_status & AS7341_FD_STAT_SAT) || !(fd_status & AS7341_FD_STAT_VALID)) {
+        return 0U; 
     }
+
+    /* Check for 100Hz (50Hz mains) */
+    if ((fd_status & AS7341_FD_STAT_100HZ_VALID) && (fd_status & AS7341_FD_STAT_100HZ)) {
+        return 50U;
+    }
+
+    /* Check for 120Hz (60Hz mains) */
+    if ((fd_status & AS7341_FD_STAT_120HZ_VALID) && (fd_status & AS7341_FD_STAT_120HZ)) {
+        return 60U;
+    }
+
+    /* Valid measurement, but no known flicker detected */
+    return 0U;
 }
