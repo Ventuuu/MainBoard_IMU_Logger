@@ -730,6 +730,7 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
      * Il PC userà questo per sincronizzarsi.
      */
     status = logger_usb_send(start_marker, sizeof(start_marker));
+    App_UpdateDownloadLed();
     if (status != LOG_OK)
     {
         return status;
@@ -744,6 +745,7 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
     total_pages_bytes[3] = (uint8_t)((total_pages >> 24U) & 0xFFU);
 
     status = logger_usb_send(total_pages_bytes, sizeof(total_pages_bytes));
+    App_UpdateDownloadLed();
     if (status != LOG_OK)
     {
         return status;
@@ -758,6 +760,8 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
      */
     for (logical_page = 0U; logical_page < total_pages; logical_page++)
     {
+        App_UpdateDownloadLed();
+
         good_block_index = (uint16_t)(logical_page / NAND_PAGES_PER_BLOCK);
         page_in_block = (uint8_t)(logical_page % NAND_PAGES_PER_BLOCK);
 
@@ -791,6 +795,7 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
          */
         status = logger_usb_send(logger_download_page_buffer,
                                  NAND_PAGE_SIZE_BYTES);
+        App_UpdateDownloadLed();
 
         if (status != LOG_OK)
         {
@@ -802,6 +807,7 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
      * Marker finale: 8 byte = "LOGEND!!".
      */
     status = logger_usb_send(end_marker, sizeof(end_marker));
+    App_UpdateDownloadLed();
     if (status != LOG_OK)
     {
         return status;

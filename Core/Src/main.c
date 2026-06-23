@@ -86,6 +86,9 @@ static volatile uint8_t audio_buffer_ready = 0U;
 
 // --- State Machine ---
 static volatile AppState current_state = STATE_IDLE;
+static uint32_t state_led_last_toggle_ms = 0U;
+static AppState previous_state_led = STATE_IDLE;
+static uint8_t state_led_initialized = 0U;
 
 // --- Global Flags ---
 volatile uint8_t usb_flag = 0U;
@@ -132,6 +135,7 @@ static void MX_TIM2_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
 /* USER CODE BEGIN PFP */
+static void UpdateStateLed(AppState state);
 
 /* USER CODE END PFP */
 
@@ -144,6 +148,74 @@ static uint32_t Time_ToMilliseconds(Time_Struct t)
            ((uint32_t)t.mm * 60000UL) +
            ((uint32_t)t.ss * 1000UL) +
            ((uint32_t)t.sss);
+}
+
+static void UpdateStateLed(AppState state)
+{
+    uint32_t now = HAL_GetTick();
+    uint32_t blink_interval_ms = 0U;
+
+    if ((state_led_initialized == 0U) || (state != previous_state_led))
+    {
+        state_led_initialized = 1U;
+        previous_state_led = state;
+        state_led_last_toggle_ms = now;
+
+        switch (state)
+        {
+            case STATE_IDLE:
+                LED_Off(LED_GREEN);
+                return;
+
+            case STATE_ACQUISITION:
+                LED_On(LED_GREEN);
+                return;
+
+            case STATE_USB_CONNECTED:
+            case STATE_DOWNLOAD:
+                LED_On(LED_GREEN);
+                return;
+
+            default:
+                LED_Off(LED_GREEN);
+                return;
+        }
+    }
+
+    switch (state)
+    {
+        case STATE_IDLE:
+            LED_Off(LED_GREEN);
+            break;
+
+        case STATE_ACQUISITION:
+            LED_On(LED_GREEN);
+            break;
+
+        case STATE_USB_CONNECTED:
+            blink_interval_ms = 500U;
+            break;
+
+        case STATE_DOWNLOAD:
+            blink_interval_ms = 125U;
+            break;
+
+        default:
+            LED_Off(LED_GREEN);
+            break;
+    }
+
+    if ((blink_interval_ms != 0U) &&
+        ((now - state_led_last_toggle_ms) >= blink_interval_ms))
+    {
+        state_led_last_toggle_ms = now;
+        LED_Toggle(LED_GREEN);
+    }
+}
+
+void App_UpdateDownloadLed(void)
+{
+    UpdateStateLed(STATE_DOWNLOAD);
 }
 
 //--michrophone acquisition complete callback: set flag and stop acquisition to prevent overwriting buffer before processing ----//
@@ -185,8 +257,7 @@ static void StopAcquisition(void)
     light_finalize_pending = 1U;
 
     current_state = STATE_IDLE;
-
-    LED_Off(LED_GREEN);
+    UpdateStateLed(current_state);
 }
 
 static void ProcessSensorTick(void)
@@ -329,6 +400,7 @@ MX_SPI3_Init();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    UpdateStateLed(current_state);
 
 	  switch(current_state)
 	  {
@@ -353,8 +425,6 @@ MX_SPI3_Init();
         {
           start_acquisition_requested = 0U;
 
-          LED_On(LED_GREEN);
-
           if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
           {
             Error_Handler();
@@ -373,6 +443,7 @@ MX_SPI3_Init();
           microphone_active = 0U;
           stop_acquisition_requested = 0U;
           current_state = STATE_ACQUISITION;
+          UpdateStateLed(current_state);
           HAL_TIM_Base_Start_IT(&htim2);
 
           break;
@@ -391,12 +462,6 @@ MX_SPI3_Init();
         if (usb_flag)
         {
           current_state = STATE_USB_CONNECTED;
-
-          LED_On(LED_GREEN);
-        }
-        else
-        {
-          LED_Off(LED_GREEN);
         }
 
         break;
@@ -531,6 +596,7 @@ void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 void Error_Handler(void)
 {
   __disable_irq();
+  LED_Off(LED_GREEN);
 
   while (1)
   {
