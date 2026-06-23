@@ -266,7 +266,7 @@ int main(void)
 MX_GPIO_Init();
 
 LED_On(LED_RED);
-HAL_Delay(5000);
+HAL_Delay(3000);
 
 MX_ICACHE_Init();
 MX_I2C3_Init();
