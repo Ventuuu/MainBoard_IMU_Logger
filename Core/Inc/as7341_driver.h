@@ -12,6 +12,10 @@
 
 #include <stdint.h>
 
+#ifndef AS7341_ENABLE_SMUX_DIAGNOSTICS
+#define AS7341_ENABLE_SMUX_DIAGNOSTICS 1U
+#endif
+
 /* ---- I2C Address -------------------------------------------------------- */
 #define AS7341_I2C_ADDRESS      0x39U
 #define AS7341_I2C_TIMEOUT      100U
@@ -107,6 +111,37 @@ typedef struct {
 typedef struct {
     uint16_t ch[12];
 } AS7341_Spectrum;
+
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+extern volatile uint16_t raw_smux_low_ch[6];
+extern volatile uint16_t raw_smux_high_ch[6];
+extern volatile uint16_t final_f1;
+extern volatile uint16_t final_f2;
+extern volatile uint16_t final_f3;
+extern volatile uint16_t final_f4;
+extern volatile uint16_t final_f5;
+extern volatile uint16_t final_f6;
+extern volatile uint16_t final_f7;
+extern volatile uint16_t final_f8;
+extern volatile uint16_t final_clear;
+extern volatile uint16_t final_nir;
+extern volatile uint8_t as7341_diag_enable_before_low_smux;
+extern volatile uint8_t as7341_diag_enable_after_low_smux;
+extern volatile uint8_t as7341_diag_enable_after_low_start;
+extern volatile uint8_t as7341_diag_enable_before_high_smux;
+extern volatile uint8_t as7341_diag_enable_after_high_smux;
+extern volatile uint8_t as7341_diag_enable_after_high_start;
+extern volatile uint8_t as7341_diag_status;
+extern volatile uint8_t as7341_diag_status2;
+extern volatile uint8_t as7341_diag_cfg0;
+extern volatile uint8_t as7341_diag_cfg1;
+extern volatile uint8_t as7341_diag_fden;
+extern volatile uint32_t as7341_diag_smux_timeout_count;
+extern volatile uint32_t as7341_diag_integration_timeout_count;
+extern volatile uint32_t as7341_diag_i2c_error_count;
+extern volatile uint32_t as7341_diag_discarded_sample_count;
+extern volatile uint32_t as7341_diag_completed_acquisition_count;
+#endif
 
 /* ---- Public Function Prototypes ----------------------------------------- */
 
