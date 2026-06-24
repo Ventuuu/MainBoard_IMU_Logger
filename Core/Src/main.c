@@ -176,6 +176,18 @@ static uint32_t Time_ToMilliseconds(Time_Struct t)
            ((uint32_t)t.sss);
 }
 
+static Time_Struct Time_FromElapsedMilliseconds(uint32_t elapsed_ms)
+{
+    Time_Struct t;
+
+    t.hh = (uint8_t)(elapsed_ms / 3600000U);
+    t.mm = (uint8_t)((elapsed_ms / 60000U) % 60U);
+    t.ss = (uint8_t)((elapsed_ms / 1000U) % 60U);
+    t.sss = (uint16_t)(elapsed_ms % 1000U);
+
+    return t;
+}
+
 static void UpdateStateLed(AppState state)
 {
     uint32_t now = HAL_GetTick();
@@ -343,6 +355,8 @@ static LogStatus AcquireAndStoreLightRawSample(void)
 
 static void ProcessSensorTick(void)
 {
+    uint32_t elapsed_ms;
+
     /* --- Read IMU --- */
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
     IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
@@ -364,28 +378,9 @@ static void ProcessSensorTick(void)
     BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
     BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
 
-    /* --- Timestamp @ 100 Hz --- */
-    timestamp.sss = tim * 10U;
-
-    if (timestamp.sss == 1000U)
-    {
-        timestamp.ss++;
-        timestamp.sss = 0U;
-        tim = 0U;
-
-        if (timestamp.ss == 60U)
-        {
-            timestamp.mm++;
-            timestamp.ss = 0U;
-
-            if (timestamp.mm == 60U)
-            {
-                timestamp.hh++;
-                timestamp.mm = 0U;
-            }
-        }
-    }
-
+    /* --- Timestamp from real elapsed session time, shared with light samples --- */
+    elapsed_ms = HAL_GetTick() - light_session_start_ms;
+    timestamp = Time_FromElapsedMilliseconds(elapsed_ms);
     tim++;
 
     /* --- NAND sensor logging --- */
