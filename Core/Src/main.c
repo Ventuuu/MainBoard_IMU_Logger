@@ -79,6 +79,7 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 #define AUDIO_BUFFER_SIZE 1024U
 #define LIGHT_SUBSAMPLE_TICKS 8U
 #define USER_BUTTON_DEBOUNCE_MS 250U
+#define NAND_STARTUP_SELF_TEST_ENABLE 0U
 
 int16_t audio_buffer[AUDIO_BUFFER_SIZE];
 MDF_DmaConfigTypeDef mic_dma_config;
@@ -135,6 +136,11 @@ volatile uint32_t light_samples_discarded = 0U;
 
 static NandLogger nand_logger;
 int exit_flag = 0;
+
+volatile int32_t nand_startup_self_test_result = -1;
+volatile uint32_t nand_startup_self_test_stage = 0U;
+volatile uint16_t nand_startup_self_test_block = UINT16_MAX;
+volatile uint8_t nand_startup_self_test_completed = 0U;
 
 // Timestamp variables //
 Time_Struct timestamp;
@@ -441,10 +447,97 @@ MX_SPI3_Init();
   MX_USB_Device_Init();
   HAL_Delay(1000);
 
-  spi_nand_init();
-  if (NANDLogger_Init(&nand_logger) != LOG_OK) {
+  int nand_init_result = spi_nand_init();
+
+#if (NAND_STARTUP_SELF_TEST_ENABLE != 0U)
+  if (nand_init_result != SPI_NAND_RET_OK)
+  {
+    nand_startup_self_test_result = nand_init_result;
+    nand_startup_self_test_stage = 6U;
+    nand_startup_self_test_completed = 1U;
+
+    while (1)
+    {
+      __NOP();
+    }
+  }
+#else
+  (void)nand_init_result;
+#endif
+
+  LogStatus nand_logger_init_status = NANDLogger_Init(&nand_logger);
+
+#if (NAND_STARTUP_SELF_TEST_ENABLE != 0U)
+  if (nand_logger_init_status != LOG_OK)
+  {
+    nand_startup_self_test_result = (int32_t)nand_logger_init_status;
+    nand_startup_self_test_stage = 6U;
+    nand_startup_self_test_completed = 1U;
+
+    while (1)
+    {
+      __NOP();
+    }
+  }
+
+  if (nand_logger.good_block_count == 0U)
+  {
+    nand_startup_self_test_result = (int32_t)LOG_ERR_NO_GOOD_BLOCKS;
+    nand_startup_self_test_stage = 6U;
+    nand_startup_self_test_completed = 1U;
+
+    while (1)
+    {
+      __NOP();
+    }
+  }
+
+  uint16_t test_good_block_index = nand_logger.good_block_count - 1U;
+  uint16_t test_block = nand_logger.good_blocks[test_good_block_index];
+  read_address_t nand_test_row = {0};
+  int self_test_ret;
+
+  nand_logger.good_block_count--;
+
+  nand_test_row.block = test_block;
+  nand_test_row.page = 0U;
+  nand_test_row.dummy = 0U;
+
+  nand_startup_self_test_block = test_block;
+  nand_startup_self_test_stage = 1U;
+
+  nand_startup_self_test_stage = 2U;
+  self_test_ret = spi_nand_block_erase(nand_test_row);
+
+  if (self_test_ret != SPI_NAND_RET_OK)
+  {
+    nand_startup_self_test_result = self_test_ret;
+    nand_startup_self_test_stage = 6U;
+    nand_startup_self_test_completed = 1U;
+
+    while (1)
+    {
+      __NOP();
+    }
+  }
+
+  nand_startup_self_test_stage = 3U;
+
+  nand_startup_self_test_stage = 4U;
+  self_test_ret = spi_nand_page_program_self_test(nand_test_row);
+  nand_startup_self_test_result = self_test_ret;
+  nand_startup_self_test_completed = 1U;
+  nand_startup_self_test_stage = (self_test_ret == SPI_NAND_RET_OK) ? 5U : 6U;
+
+  while (1)
+  {
+    __NOP();
+  }
+#else
+  if (nand_logger_init_status != LOG_OK) {
     Error_Handler();
-}
+  }
+#endif
 
 
   if(IMU_Init() == 1) {

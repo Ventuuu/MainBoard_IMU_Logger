@@ -32,6 +32,28 @@
 //extern SPI_HandleTypeDef hspi3;
 extern SPI_HandleTypeDef hspi2;
 
+#define NAND_SPI_PROGRAM_LOAD_CHUNK_BYTES 32U
+#define NAND_PAGE_PROGRAM_SELF_TEST 0U
+
+volatile uint32_t nand_program_load_requested_bytes = 0U;
+volatile uint32_t nand_program_load_transmitted_bytes = 0U;
+volatile uint32_t nand_program_load_calls = 0U;
+volatile uint32_t nand_program_load_partial_failures = 0U;
+volatile uint32_t nand_spi_chunk_count = 0U;
+volatile uint32_t nand_program_load_last_hal_status = 0U;
+volatile uint32_t nand_program_load_first_failed_chunk = UINT32_MAX;
+volatile uint32_t nand_program_self_test_first_mismatch_offset = UINT32_MAX;
+volatile uint32_t nand_program_self_test_expected_byte = 0U;
+volatile uint32_t nand_program_self_test_read_byte = 0U;
+volatile uint32_t nand_program_self_test_requested_bytes = 0U;
+volatile uint32_t nand_program_self_test_transmitted_bytes = 0U;
+volatile uint32_t nand_array_verify_count = 0U;
+volatile int32_t nand_array_verify_last_page_read_status = SPI_NAND_RET_OK;
+volatile int32_t nand_array_verify_last_cache_read_status = SPI_NAND_RET_OK;
+volatile uint32_t nand_array_verify_first_mismatch_offset = UINT32_MAX;
+volatile uint8_t nand_array_verify_last_program_status = 0U;
+volatile uint8_t nand_array_verify_last_p_fail = 0U;
+
 // extern variables memory
 extern uint8_t NAND_packet[4096];
 extern uint16_t sample;
@@ -73,6 +95,10 @@ int get_ret_from_ecc_status(feature_reg_status_t status);
 int spi_nand_page_program2(read_address_t row, column_address_t column, const uint8_t *data_in,
                           size_t write_len);
 void spi_nand_page_program_chunk(read_address_t row, column_address_t column,const uint8_t *data_in,size_t chunk );
+static int spi_write_counted(const uint8_t *write_buff,
+                             size_t write_len,
+                             uint32_t timeout_ms,
+                             uint32_t *transmitted_bytes);
 
 int spi_nand_init(void)
 {
@@ -308,10 +334,14 @@ int spi_nand_page_read(read_address_t row, column_address_t column, uint8_t *dat
     uint16_t max_read_len = (SPI_NAND_PAGE_SIZE + SPI_NAND_SPARE_SIZE) - column;
     if (read_len > max_read_len) return SPI_NAND_RET_INVALID_LEN;
 
-    page_read(row, SPI_TIMEOUT);  // read page into flash's internal cache
-    //if (SPI_NAND_RET_OK != ret) return ret;
+    int ret = page_read(row, SPI_TIMEOUT);  // read page into flash's internal cache
+    nand_array_verify_last_page_read_status = ret;
+    if (SPI_NAND_RET_OK != ret) return ret;
 
-    return read_from_cache(column, data_out, read_len, SPI_TIMEOUT);  // read from cache
+    ret = read_from_cache(column, data_out, read_len, SPI_TIMEOUT);  // read from cache
+    nand_array_verify_last_cache_read_status = ret;
+
+    return ret;
 }
 
 int spi_write_read(const uint8_t *write_buff, uint8_t *read_buff, size_t transfer_len,
@@ -357,10 +387,80 @@ int spi_nand_page_program(read_address_t row, column_address_t column, const uin
     if (SPI_NAND_RET_OK != ret) return ret;
 
     ret = program_load(column, data_in, write_len, SPI_TIMEOUT);
-    //if (SPI_NAND_RET_OK != ret) return ret;
+    if (SPI_NAND_RET_OK != ret) return ret;
 
 
     return program_execute(row, SPI_TIMEOUT);
+}
+
+int spi_nand_page_program_self_test(read_address_t row)
+{
+    static uint8_t test_write_buffer[SPI_NAND_PAGE_SIZE];
+    static uint8_t test_read_buffer[SPI_NAND_PAGE_SIZE];
+    column_address_t column = 0U;
+    int ret;
+
+    nand_program_self_test_first_mismatch_offset = UINT32_MAX;
+    nand_program_self_test_expected_byte = 0U;
+    nand_program_self_test_read_byte = 0U;
+    nand_program_self_test_requested_bytes = SPI_NAND_PAGE_SIZE;
+    nand_program_self_test_transmitted_bytes = 0U;
+    nand_array_verify_first_mismatch_offset = UINT32_MAX;
+    nand_array_verify_last_page_read_status = SPI_NAND_RET_OK;
+    nand_array_verify_last_cache_read_status = SPI_NAND_RET_OK;
+
+    for (uint32_t i = 0U; i < SPI_NAND_PAGE_SIZE; i++)
+    {
+        test_write_buffer[i] = (uint8_t)((i ^ (i >> 3U) ^ 0xA5U) & 0xFFU);
+        test_read_buffer[i] = 0xFFU;
+    }
+
+    ret = spi_nand_block_erase(row);
+    if (ret != SPI_NAND_RET_OK)
+    {
+        nand_array_verify_last_program_status = 1U;
+        nand_array_verify_first_mismatch_offset = 0U;
+        return ret;
+    }
+
+    ret = spi_nand_page_program(row,
+                                column,
+                                test_write_buffer,
+                                SPI_NAND_PAGE_SIZE);
+    nand_program_self_test_transmitted_bytes = nand_program_load_transmitted_bytes;
+    nand_array_verify_last_program_status = (uint8_t)(ret == SPI_NAND_RET_OK ? 0U : 1U);
+
+    if (ret != SPI_NAND_RET_OK)
+    {
+        nand_array_verify_first_mismatch_offset = 0U;
+        return ret;
+    }
+
+    nand_array_verify_count++;
+
+    ret = spi_nand_page_read(row,
+                             column,
+                             test_read_buffer,
+                             SPI_NAND_PAGE_SIZE);
+    if (ret != SPI_NAND_RET_OK)
+    {
+        nand_array_verify_first_mismatch_offset = 0U;
+        return ret;
+    }
+
+    for (uint32_t i = 0U; i < SPI_NAND_PAGE_SIZE; i++)
+    {
+        if (test_read_buffer[i] != test_write_buffer[i])
+        {
+            nand_program_self_test_first_mismatch_offset = i;
+            nand_array_verify_first_mismatch_offset = i;
+            nand_program_self_test_expected_byte = test_write_buffer[i];
+            nand_program_self_test_read_byte = test_read_buffer[i];
+            return SPI_NAND_RET_BAD_SPI;
+        }
+    }
+
+    return SPI_NAND_RET_OK;
 }
 
 
@@ -472,6 +572,8 @@ int program_load(column_address_t column, const uint8_t *data_in, size_t write_l
     // setup data for program load (need to go from LSB -> MSB first on address)
 
 	uint8_t tx_data[3];
+    uint32_t transmitted_data_bytes = 0U;
+    uint32_t transmitted_header_bytes = 0U;
 	tx_data[0] = CMD_PROGRAM_LOAD;
 	cache_address_t data;
 	data.dummy1 = 0;   // 3 dummy bits
@@ -480,17 +582,39 @@ int program_load(column_address_t column, const uint8_t *data_in, size_t write_l
 	tx_data[1] = (data.whole >> 16) & 0xFF;
 	tx_data[2] = (data.whole >> 8) & 0xFF;
 
+    nand_program_load_calls++;
+    nand_program_load_requested_bytes = (uint32_t)write_len;
+    nand_program_load_transmitted_bytes = 0U;
+    nand_program_load_last_hal_status = HAL_OK;
+    nand_program_load_first_failed_chunk = UINT32_MAX;
+
     // perform transaction
     cs_select();
 
-    int ret = spi_write(tx_data, 3, timeout);
+    int ret = spi_write_counted(tx_data,
+                                sizeof(tx_data),
+                                timeout,
+                                &transmitted_header_bytes);
     if (SPI_NAND_RET_OK == ret) {
-        ret = spi_write(data_in, write_len, timeout);
+        ret = spi_write_counted(data_in,
+                                write_len,
+                                timeout,
+                                &transmitted_data_bytes);
     }
 
     cs_deselect();
 
-    return (SPI_NAND_RET_OK == ret) ? SPI_NAND_RET_OK : SPI_NAND_RET_BAD_SPI;
+    nand_program_load_transmitted_bytes = transmitted_data_bytes;
+
+    if ((ret != SPI_NAND_RET_OK) ||
+        (transmitted_header_bytes != sizeof(tx_data)) ||
+        (transmitted_data_bytes != write_len))
+    {
+        nand_program_load_partial_failures++;
+        return SPI_NAND_RET_BAD_SPI;
+    }
+
+    return SPI_NAND_RET_OK;
 }
 
 
@@ -505,6 +629,8 @@ int program_load_random_data(column_address_t column, uint8_t *data_in, size_t w
 	 */
     // setup data for program load (need to go from LSB -> MSB first on address)
 	uint8_t tx_data[3];
+    uint32_t transmitted_data_bytes = 0U;
+    uint32_t transmitted_header_bytes = 0U;
 	tx_data[0] = CMD_PROGRAM_LOAD_RANDOM_DATA;
 	cache_address_t data;
 	data.dummy1 = 0;   // 3 dummy bits
@@ -515,14 +641,27 @@ int program_load_random_data(column_address_t column, uint8_t *data_in, size_t w
 
     // perform transaction
     cs_select();
-    int ret = spi_write(tx_data, 3, timeout);
+    int ret = spi_write_counted(tx_data,
+                                sizeof(tx_data),
+                                timeout,
+                                &transmitted_header_bytes);
     if (SPI_NAND_RET_OK == ret) {
-        ret = spi_write(data_in, write_len, timeout);
+        ret = spi_write_counted(data_in,
+                                write_len,
+                                timeout,
+                                &transmitted_data_bytes);
     }
     cs_deselect();
 
 
-    return (SPI_NAND_RET_OK == ret) ? SPI_NAND_RET_OK : SPI_NAND_RET_BAD_SPI;
+    if ((ret != SPI_NAND_RET_OK) ||
+        (transmitted_header_bytes != sizeof(tx_data)) ||
+        (transmitted_data_bytes != write_len))
+    {
+        return SPI_NAND_RET_BAD_SPI;
+    }
+
+    return SPI_NAND_RET_OK;
 }
 
 int program_execute(read_address_t row, uint32_t timeout)
@@ -546,16 +685,21 @@ int program_execute(read_address_t row, uint32_t timeout)
 
    	feature_reg_status_t status;
 	status = poll_for_oip_clear(timeout);
+    nand_array_verify_last_p_fail = status.P_FAIL;
 
 	if (status.OIP)
 	{
+        nand_array_verify_last_program_status = 1U;
 		return SPI_NAND_RET_BAD_SPI;
 	}
 
 	if (status.P_FAIL)
 	{
+        nand_array_verify_last_program_status = 1U;
 		return SPI_NAND_RET_P_FAIL;
 	}
+
+    nand_array_verify_last_program_status = 0U;
 
 	return SPI_NAND_RET_OK;
 }
@@ -725,10 +869,78 @@ int spi_read(uint8_t *read_buff, size_t read_len, uint32_t timeout_ms)
     return SPI_NAND_RET_OK;
 }
 
-int spi_write(uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
+static int spi_write_counted(const uint8_t *write_buff,
+                             size_t write_len,
+                             uint32_t timeout_ms,
+                             uint32_t *transmitted_bytes)
 {
-	int r = HAL_SPI_Transmit(&hspi2, write_buff, write_len, timeout_ms);
-    return r;
+    size_t remaining = write_len;
+    const uint8_t *cursor = write_buff;
+    uint32_t local_transmitted = 0U;
+    uint32_t chunk_index = 0U;
+
+    if (transmitted_bytes != NULL)
+    {
+        *transmitted_bytes = 0U;
+    }
+
+    if ((write_buff == NULL) && (write_len != 0U))
+    {
+        nand_program_load_last_hal_status = HAL_ERROR;
+        return SPI_NAND_RET_BAD_SPI;
+    }
+
+    while (remaining > 0U)
+    {
+        size_t chunk = remaining;
+        HAL_StatusTypeDef hal_status;
+
+        if (chunk > NAND_SPI_PROGRAM_LOAD_CHUNK_BYTES)
+        {
+            chunk = NAND_SPI_PROGRAM_LOAD_CHUNK_BYTES;
+        }
+
+        hal_status = HAL_SPI_Transmit(&hspi2,
+                                      (uint8_t *)cursor,
+                                      (uint16_t)chunk,
+                                      timeout_ms);
+
+        nand_program_load_last_hal_status = (uint32_t)hal_status;
+
+        if (hal_status != HAL_OK)
+        {
+            if (nand_program_load_first_failed_chunk == UINT32_MAX)
+            {
+                nand_program_load_first_failed_chunk = chunk_index;
+            }
+
+            if (transmitted_bytes != NULL)
+            {
+                *transmitted_bytes = local_transmitted;
+            }
+
+            return SPI_NAND_RET_BAD_SPI;
+        }
+
+        local_transmitted += (uint32_t)chunk;
+        cursor += chunk;
+        remaining -= chunk;
+        chunk_index++;
+        nand_spi_chunk_count++;
+    }
+
+    if (transmitted_bytes != NULL)
+    {
+        *transmitted_bytes = local_transmitted;
+    }
+
+    return SPI_NAND_RET_OK;
+}
+
+int spi_write(const uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
+{
+    uint32_t transmitted = 0U;
+    return spi_write_counted(write_buff, write_len, timeout_ms, &transmitted);
 }
 
 // al posto che eliminarle le metto come commenti

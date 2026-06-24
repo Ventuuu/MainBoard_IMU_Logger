@@ -93,6 +93,8 @@
 extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 
 /* USER CODE BEGIN EXPORTED_VARIABLES */
+extern volatile uint8_t usb_cdc_tx_done;
+extern volatile uint32_t usb_cdc_tx_complete_count;
 
 /* USER CODE END EXPORTED_VARIABLES */
 

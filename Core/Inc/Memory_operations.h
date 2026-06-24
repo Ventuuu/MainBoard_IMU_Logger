@@ -71,7 +71,8 @@ typedef enum
     LOG_ERR_FULL,
     LOG_ERR_NO_GOOD_BLOCKS,
     LOG_ERR_BAD_ARGUMENT,
-    LOG_ERR_NAND
+    LOG_ERR_NAND,
+    LOG_ERR_USB
 } LogStatus;
 
 
@@ -146,6 +147,24 @@ typedef struct
     uint32_t light_payload_consistency_failures;
 } NandLogger;
 
+extern volatile uint32_t nand_erase_attempts;
+extern volatile uint32_t nand_erase_failures;
+extern volatile uint16_t nand_first_failed_erase_block;
+extern volatile int32_t nand_last_erase_status;
+extern volatile uint32_t light_prewrite_check_count;
+extern volatile uint32_t light_prewrite_declared_payload_bytes;
+extern volatile uint32_t light_prewrite_declared_record_count;
+extern volatile uint32_t light_prewrite_first_all_ff_record;
+extern volatile uint32_t light_prewrite_first_partial_record;
+extern volatile uint32_t light_prewrite_last_non_ff_offset;
+extern volatile uint32_t light_prewrite_current_record_count;
+extern volatile uint32_t usb_tx_submit_count;
+extern volatile uint32_t usb_tx_complete_count;
+extern volatile uint32_t usb_tx_busy_retry_count;
+extern volatile uint32_t usb_tx_fail_count;
+extern volatile uint32_t usb_tx_timeout_count;
+extern volatile uint16_t usb_tx_last_length;
+extern volatile uint8_t usb_tx_last_status;
 
 LogStatus NANDLogger_Init(NandLogger *logger);
 

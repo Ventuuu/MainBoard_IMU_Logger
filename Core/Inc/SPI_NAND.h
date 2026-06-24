@@ -145,10 +145,30 @@ typedef union {
     };
 } feature_reg_block_lock_t;
 
+extern volatile uint32_t nand_program_load_requested_bytes;
+extern volatile uint32_t nand_program_load_transmitted_bytes;
+extern volatile uint32_t nand_program_load_calls;
+extern volatile uint32_t nand_program_load_partial_failures;
+extern volatile uint32_t nand_spi_chunk_count;
+extern volatile uint32_t nand_program_load_last_hal_status;
+extern volatile uint32_t nand_program_load_first_failed_chunk;
+extern volatile uint32_t nand_program_self_test_first_mismatch_offset;
+extern volatile uint32_t nand_program_self_test_expected_byte;
+extern volatile uint32_t nand_program_self_test_read_byte;
+extern volatile uint32_t nand_program_self_test_requested_bytes;
+extern volatile uint32_t nand_program_self_test_transmitted_bytes;
+extern volatile uint32_t nand_array_verify_count;
+extern volatile int32_t nand_array_verify_last_page_read_status;
+extern volatile int32_t nand_array_verify_last_cache_read_status;
+extern volatile uint32_t nand_array_verify_first_mismatch_offset;
+extern volatile uint8_t nand_array_verify_last_program_status;
+extern volatile uint8_t nand_array_verify_last_p_fail;
+
 int spi_nand_init(void);
 int spi_nand_page_read(read_address_t row, column_address_t column, uint8_t *data_out, size_t read_len);
 
 int spi_nand_page_program(read_address_t row, column_address_t column, const uint8_t *data_in, size_t write_len);
+int spi_nand_page_program_self_test(read_address_t row);
 int spi_nand_page_copy(row_address_t src, row_address_t dest);
 int spi_nand_block_erase(read_address_t row);
 int spi_nand_block_is_bad(read_address_t row, bool *is_bad);
@@ -175,7 +195,7 @@ void cs_select(void);
 void cs_deselect(void);
 int spi_write_read(const uint8_t *write_buff, uint8_t *read_buff, size_t transfer_len, uint32_t timeout_ms);
 int spi_read(uint8_t *read_buff, size_t read_len, uint32_t timeout_ms);
-int spi_write(uint8_t *write_buff, size_t write_len, uint32_t timeout_ms);
+int spi_write(const uint8_t *write_buff, size_t write_len, uint32_t timeout_ms);
 int unlock_all_blocks(void);
 int enable_ecc(void);
 bool validate_row_address(read_address_t row);

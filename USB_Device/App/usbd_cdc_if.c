@@ -109,6 +109,8 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 extern USBD_HandleTypeDef hUsbDeviceFS;
 
 /* USER CODE BEGIN EXPORTED_VARIABLES */
+volatile uint8_t usb_cdc_tx_done = 0U;
+volatile uint32_t usb_cdc_tx_complete_count = 0U;
 
 /* USER CODE END EXPORTED_VARIABLES */
 
@@ -311,6 +313,8 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
 {
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 13 */
+  usb_cdc_tx_done = 1U;
+  usb_cdc_tx_complete_count++;
   UNUSED(Buf);
   UNUSED(Len);
   UNUSED(epnum);
