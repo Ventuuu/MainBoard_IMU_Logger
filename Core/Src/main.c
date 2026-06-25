@@ -87,6 +87,49 @@ MDF_DmaConfigTypeDef mic_dma_config;
 static volatile uint8_t microphone_active = 0U;
 static volatile uint8_t audio_buffer_ready = 0U;
 
+typedef struct
+{
+    uint32_t session_start_tick_ms;
+    uint32_t session_stop_tick_ms;
+
+    uint32_t dma_start_attempt_count;
+    uint32_t dma_start_ok_count;
+    uint32_t dma_start_error_count;
+
+    uint32_t dma_complete_count;
+    uint32_t dma_error_callback_count;
+
+    uint32_t buffer_ready_count;
+    uint32_t buffer_drop_or_overwrite_count;
+
+    uint32_t mdf_stop_attempt_count;
+    uint32_t mdf_stop_ok_count;
+    uint32_t mdf_stop_error_count;
+
+    uint32_t nand_append_attempt_count;
+    uint32_t nand_append_ok_count;
+    uint32_t nand_append_error_count;
+
+    uint32_t audio_pages_confirmed_written;
+
+    uint32_t page_sequence_before_last_append;
+    uint32_t page_sequence_after_last_append;
+    uint32_t last_page_sequence_delta;
+
+    uint32_t last_dma_start_tick_ms;
+    uint32_t last_dma_complete_tick_ms;
+    uint32_t last_nand_append_tick_ms;
+
+    uint32_t last_mdf_error_code;
+    uint32_t last_dma_error_code;
+
+    int32_t last_dma_start_status;
+    int32_t last_mdf_stop_status;
+    int32_t last_nand_append_status;
+} MicDiagnostics;
+
+volatile MicDiagnostics mic_diag;
+
 // --- State Machine ---
 static volatile AppState current_state = STATE_IDLE;
 static uint32_t state_led_last_toggle_ms = 0U;
@@ -256,6 +299,20 @@ void App_UpdateDownloadLed(void)
     UpdateStateLed(STATE_DOWNLOAD);
 }
 
+static void MicDiagnostics_UpdateErrorCodes(void)
+{
+    mic_diag.last_mdf_error_code = MdfHandle0.ErrorCode;
+
+    if (MdfHandle0.hdma != NULL)
+    {
+        mic_diag.last_dma_error_code = MdfHandle0.hdma->ErrorCode;
+    }
+    else
+    {
+        mic_diag.last_dma_error_code = 0U;
+    }
+}
+
 //--michrophone acquisition complete callback: set flag and stop acquisition to prevent overwriting buffer before processing ----//
 void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 {
@@ -264,28 +321,63 @@ void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
         return;
     }
 
-    microphone_active = 0U;
+    mic_diag.dma_complete_count++;
+    mic_diag.last_dma_complete_tick_ms = HAL_GetTick();
+
 
     if (current_state == STATE_ACQUISITION)
     {
+        if (audio_buffer_ready != 0U)
+        {
+            mic_diag.buffer_drop_or_overwrite_count++;
+        }
+
         audio_buffer_ready = 1U;
+        mic_diag.buffer_ready_count++;
     }
     else
     {
         audio_buffer_ready = 0U;
     }
 }
+
+void HAL_MDF_ErrorCallback(MDF_HandleTypeDef *hmdf)
+{
+    if (hmdf != &MdfHandle0)
+    {
+        return;
+    }
+
+    mic_diag.dma_error_callback_count++;
+    MicDiagnostics_UpdateErrorCodes();
+}
 /* USER CODE END 0 */
 static void StopAcquisition(void)
 {
     uint32_t stop_ms = HAL_GetTick();
     LogStatus flush_status;
+    HAL_StatusTypeDef stop_status;
 
     HAL_TIM_Base_Stop_IT(&htim2);
 
+    mic_diag.session_stop_tick_ms = stop_ms;
+
     if (microphone_active)
     {
-        HAL_MDF_AcqStop_DMA(&MdfHandle0);
+        mic_diag.mdf_stop_attempt_count++;
+        stop_status = HAL_MDF_AcqStop_DMA(&MdfHandle0);
+        mic_diag.last_mdf_stop_status = (int32_t)stop_status;
+        MicDiagnostics_UpdateErrorCodes();
+
+        if (stop_status == HAL_OK)
+        {
+            mic_diag.mdf_stop_ok_count++;
+        }
+        else
+        {
+            mic_diag.mdf_stop_error_count++;
+        }
+
         microphone_active = 0U;
     }
 
@@ -591,6 +683,10 @@ MX_SPI3_Init();
           {
             Error_Handler();
           }
+
+          memset((void *)&mic_diag, 0, sizeof(mic_diag));
+          mic_diag.session_start_tick_ms = HAL_GetTick();
+
           timestamp.hh = 0U;
           timestamp.mm = 0U;
           timestamp.ss = 0U;
@@ -621,8 +717,23 @@ MX_SPI3_Init();
 
         if (microphone_active)
         {
-        HAL_MDF_AcqStop_DMA(&MdfHandle0);
-        microphone_active = 0U;
+          HAL_StatusTypeDef stop_status;
+
+          mic_diag.mdf_stop_attempt_count++;
+          stop_status = HAL_MDF_AcqStop_DMA(&MdfHandle0);
+          mic_diag.last_mdf_stop_status = (int32_t)stop_status;
+          MicDiagnostics_UpdateErrorCodes();
+
+          if (stop_status == HAL_OK)
+          {
+            mic_diag.mdf_stop_ok_count++;
+          }
+          else
+          {
+            mic_diag.mdf_stop_error_count++;
+          }
+
+          microphone_active = 0U;
         }
 
         audio_buffer_ready = 0U;
@@ -643,7 +754,7 @@ MX_SPI3_Init();
               break;
           }
           
-          while ((sensor_tick_pending > 0U) &&
+          if ((sensor_tick_pending > 0U) &&
                   (current_state == STATE_ACQUISITION) &&
                   (stop_acquisition_requested == 0U))
           {
@@ -660,34 +771,97 @@ MX_SPI3_Init();
         
          if (audio_buffer_ready && current_state == STATE_ACQUISITION)
           {
+            HAL_StatusTypeDef stop_status;
+            LogStatus append_status;
+            uint32_t page_delta;
+
             /*
             * Il DMA normal ha completato il buffer, ma in modalità
             * MDF_MODE_ASYNC_CONT il filtro hardware rimane attivo.
             * Deve essere fermato prima di poter avviare il DMA successivo.
             */
-            if (HAL_MDF_AcqStop_DMA(&MdfHandle0) != HAL_OK)
+            mic_diag.mdf_stop_attempt_count++;
+            stop_status = HAL_MDF_AcqStop_DMA(&MdfHandle0);
+            mic_diag.last_mdf_stop_status = (int32_t)stop_status;
+            MicDiagnostics_UpdateErrorCodes();
+
+            if (stop_status == HAL_OK)
             {
+                mic_diag.mdf_stop_ok_count++;
+                microphone_active = 0U;
+            }
+            else
+            {
+                mic_diag.mdf_stop_error_count++;
                 Error_Handler();
             }
 
             audio_buffer_ready = 0U;
 
-            if (NANDLogger_AppendAudioBuffer(
+            mic_diag.nand_append_attempt_count++;
+            mic_diag.page_sequence_before_last_append = nand_logger.page_sequence;
+
+            append_status = NANDLogger_AppendAudioBuffer(
                     &nand_logger,
                     audio_buffer,
                     AUDIO_BUFFER_SIZE,
-                    Time_ToMilliseconds(timestamp)) != LOG_OK)
+                    Time_ToMilliseconds(timestamp));
+
+            mic_diag.last_nand_append_status = (int32_t)append_status;
+            mic_diag.page_sequence_after_last_append = nand_logger.page_sequence;
+
+            if (mic_diag.page_sequence_after_last_append >= mic_diag.page_sequence_before_last_append)
+            {
+                page_delta = mic_diag.page_sequence_after_last_append -
+                             mic_diag.page_sequence_before_last_append;
+            }
+            else
+            {
+                page_delta = 0U;
+            }
+
+            mic_diag.last_page_sequence_delta = page_delta;
+            mic_diag.last_nand_append_tick_ms = HAL_GetTick();
+
+            if (append_status == LOG_OK)
+            {
+                mic_diag.nand_append_ok_count++;
+
+                if (page_delta == 1U)
                 {
+                    mic_diag.audio_pages_confirmed_written++;
+                }
+            }
+            else
+            {
+                mic_diag.nand_append_error_count++;
                 StopAcquisition();
                 LED_On(LED_RED);
-                }
+            }
           }
-          else if (!microphone_active && current_state == STATE_ACQUISITION)
+          else if ((audio_buffer_ready == 0U) &&
+                    (microphone_active == 0U) &&
+                    (current_state == STATE_ACQUISITION))
           {
-            if (HAL_MDF_AcqStart_DMA(&MdfHandle0,
-                                 &MdfFilterConfig0,
-                                 &mic_dma_config) != HAL_OK)
+            HAL_StatusTypeDef start_status;
+
+            mic_diag.dma_start_attempt_count++;
+            mic_diag.last_dma_start_tick_ms = HAL_GetTick();
+
+            start_status = HAL_MDF_AcqStart_DMA(&MdfHandle0,
+                                                &MdfFilterConfig0,
+                                                &mic_dma_config);
+
+            mic_diag.last_dma_start_status = (int32_t)start_status;
+            MicDiagnostics_UpdateErrorCodes();
+
+            if (start_status == HAL_OK)
             {
+              mic_diag.dma_start_ok_count++;
+            }
+            else
+            {
+              mic_diag.dma_start_error_count++;
               Error_Handler();
             }
 
@@ -796,7 +970,7 @@ void Error_Handler(void)
   while (1)
   {
     LED_Toggle(LED_RED);
-    HAL_Delay(200);
+    HAL_Delay(700);
   }
 }
 
