@@ -49,6 +49,8 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
 static DMA_HandleTypeDef handle_GPDMA1_Channel0;
+static DMA_NodeTypeDef handle_GPDMA1_Channel0_Node;
+static DMA_QListTypeDef handle_GPDMA1_Channel0_Queue;
 
 /* USER CODE END PV */
 
@@ -256,9 +258,53 @@ void HAL_MDF_MspInit(MDF_HandleTypeDef* hmdf)
     handle_GPDMA1_Channel0.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;
     handle_GPDMA1_Channel0.Init.TransferEventMode = DMA_TCEM_BLOCK_TRANSFER;
     handle_GPDMA1_Channel0.Init.Mode = DMA_NORMAL;
-    if (HAL_DMA_Init(&handle_GPDMA1_Channel0) != HAL_OK)
     {
-      Error_Handler();
+      DMA_NodeConfTypeDef node_config = {0};
+
+      handle_GPDMA1_Channel0.InitLinkedList.Priority = DMA_LOW_PRIORITY_HIGH_WEIGHT;
+      handle_GPDMA1_Channel0.InitLinkedList.LinkStepMode = DMA_LSM_FULL_EXECUTION;
+      handle_GPDMA1_Channel0.InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT0;
+      handle_GPDMA1_Channel0.InitLinkedList.TransferEventMode = DMA_TCEM_BLOCK_TRANSFER;
+      handle_GPDMA1_Channel0.InitLinkedList.LinkedListMode = DMA_LINKEDLIST_CIRCULAR;
+
+      if (HAL_DMAEx_List_Init(&handle_GPDMA1_Channel0) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+      node_config.NodeType = DMA_GPDMA_LINEAR_NODE;
+      node_config.Init = handle_GPDMA1_Channel0.Init;
+      node_config.DataHandlingConfig.DataAlignment = DMA_DATA_RIGHTALIGN_ZEROPADDED;
+      node_config.DataHandlingConfig.DataExchange = DMA_EXCHANGE_NONE;
+      node_config.TriggerConfig.TriggerPolarity = DMA_TRIG_POLARITY_MASKED;
+      node_config.TriggerConfig.TriggerMode = DMA_TRIGM_BLOCK_TRANSFER;
+      node_config.TriggerConfig.TriggerSelection = 0U;
+      node_config.SrcAddress = 0U;
+      node_config.DstAddress = 0U;
+      node_config.DataSize = 1U;
+
+      if (HAL_DMAEx_List_BuildNode(&node_config, &handle_GPDMA1_Channel0_Node) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+      if (HAL_DMAEx_List_InsertNode(&handle_GPDMA1_Channel0_Queue,
+                                    NULL,
+                                    &handle_GPDMA1_Channel0_Node) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+      if (HAL_DMAEx_List_SetCircularMode(&handle_GPDMA1_Channel0_Queue) != HAL_OK)
+      {
+        Error_Handler();
+      }
+
+      if (HAL_DMAEx_List_LinkQ(&handle_GPDMA1_Channel0,
+                               &handle_GPDMA1_Channel0_Queue) != HAL_OK)
+      {
+        Error_Handler();
+      }
     }
 
     __HAL_LINKDMA(hmdf, hdma, handle_GPDMA1_Channel0);

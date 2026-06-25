@@ -76,16 +76,27 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 /* USER CODE BEGIN PV */
 
 //--- Microphone acquisition variables ---
-#define AUDIO_BUFFER_SIZE 1024U
+#define AUDIO_CHUNK_SAMPLES 1024U
+#define AUDIO_DMA_BUFFER_SAMPLES (2U * AUDIO_CHUNK_SAMPLES)
+#define AUDIO_RING_SLOT_COUNT 32U
 #define LIGHT_SUBSAMPLE_TICKS 8U
 #define USER_BUTTON_DEBOUNCE_MS 250U
 #define NAND_STARTUP_SELF_TEST_ENABLE 0U
 
-int16_t audio_buffer[AUDIO_BUFFER_SIZE];
+typedef struct
+{
+    int16_t samples[AUDIO_CHUNK_SAMPLES];
+} AudioRingSlot;
+
+static int16_t audio_dma_buffer[AUDIO_DMA_BUFFER_SAMPLES];
+static AudioRingSlot audio_ring[AUDIO_RING_SLOT_COUNT];
+
 MDF_DmaConfigTypeDef mic_dma_config;
 
 static volatile uint8_t microphone_active = 0U;
-static volatile uint8_t audio_buffer_ready = 0U;
+static volatile uint8_t audio_accept_chunks = 0U;
+volatile uint32_t audio_ring_head = 0U;
+volatile uint32_t audio_ring_tail = 0U;
 
 typedef struct
 {
@@ -96,11 +107,26 @@ typedef struct
     uint32_t dma_start_ok_count;
     uint32_t dma_start_error_count;
 
+    uint32_t dma_half_complete_count;
+    uint32_t dma_full_complete_count;
     uint32_t dma_complete_count;
     uint32_t dma_error_callback_count;
 
     uint32_t buffer_ready_count;
     uint32_t buffer_drop_or_overwrite_count;
+
+    uint32_t audio_chunks_enqueued;
+    uint32_t audio_chunks_dequeued;
+    uint32_t audio_ring_overflow_count;
+    uint32_t audio_ring_high_watermark;
+    uint32_t audio_ring_count_at_stop;
+
+    uint32_t dma_session_start_ok_count;
+    uint32_t dma_session_start_error_count;
+    uint32_t dma_session_stop_ok_count;
+    uint32_t dma_session_stop_error_count;
+
+    uint32_t final_partial_chunk_discarded_count;
 
     uint32_t mdf_stop_attempt_count;
     uint32_t mdf_stop_ok_count;
@@ -205,6 +231,11 @@ static void MX_SPI3_Init(void);
 /* USER CODE BEGIN PFP */
 static void UpdateStateLed(AppState state);
 static LogStatus AcquireAndStoreLightRawSample(void);
+static void AudioRing_Reset(void);
+static uint32_t AudioRing_Count(void);
+static void AudioRing_EnqueueFromIsr(const int16_t *samples);
+static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms);
+static LogStatus Audio_DrainQueuedChunks(uint32_t timestamp_ms);
 
 /* USER CODE END PFP */
 
@@ -229,6 +260,155 @@ static Time_Struct Time_FromElapsedMilliseconds(uint32_t elapsed_ms)
     t.sss = (uint16_t)(elapsed_ms % 1000U);
 
     return t;
+}
+
+static uint32_t AudioRing_CountFrom(uint32_t head, uint32_t tail)
+{
+    if (head >= tail)
+    {
+        return head - tail;
+    }
+
+    return (AUDIO_RING_SLOT_COUNT - tail) + head;
+}
+
+static uint32_t AudioRing_Count(void)
+{
+    uint32_t head = audio_ring_head;
+    uint32_t tail = audio_ring_tail;
+
+    return AudioRing_CountFrom(head, tail);
+}
+
+static void AudioRing_Reset(void)
+{
+    audio_accept_chunks = 0U;
+    audio_ring_head = 0U;
+    audio_ring_tail = 0U;
+    __DMB();
+}
+
+static void AudioRing_UpdateHighWatermark(uint32_t count)
+{
+    if (count > mic_diag.audio_ring_high_watermark)
+    {
+        mic_diag.audio_ring_high_watermark = count;
+    }
+}
+
+static void AudioRing_EnqueueFromIsr(const int16_t *samples)
+{
+    uint32_t head;
+    uint32_t tail;
+    uint32_t next_head;
+
+    if ((current_state != STATE_ACQUISITION) || (audio_accept_chunks == 0U))
+    {
+        return;
+    }
+
+    head = audio_ring_head;
+    tail = audio_ring_tail;
+    next_head = head + 1U;
+    if (next_head >= AUDIO_RING_SLOT_COUNT)
+    {
+        next_head = 0U;
+    }
+
+    if (next_head == tail)
+    {
+        mic_diag.audio_ring_overflow_count++;
+        mic_diag.buffer_drop_or_overwrite_count++;
+        return;
+    }
+
+    memcpy(audio_ring[head].samples, samples, AUDIO_CHUNK_SAMPLES * sizeof(int16_t));
+    __DMB();
+
+    audio_ring_head = next_head;
+    mic_diag.audio_chunks_enqueued++;
+    mic_diag.buffer_ready_count++;
+    AudioRing_UpdateHighWatermark(AudioRing_CountFrom(next_head, tail));
+}
+
+static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
+{
+    LogStatus append_status;
+    uint32_t tail;
+    uint32_t next_tail;
+    uint32_t page_delta;
+
+    if (audio_ring_tail == audio_ring_head)
+    {
+        return LOG_OK;
+    }
+
+    __DMB();
+    tail = audio_ring_tail;
+    next_tail = tail + 1U;
+    if (next_tail >= AUDIO_RING_SLOT_COUNT)
+    {
+        next_tail = 0U;
+    }
+
+    mic_diag.nand_append_attempt_count++;
+    mic_diag.page_sequence_before_last_append = nand_logger.page_sequence;
+
+    append_status = NANDLogger_AppendAudioBuffer(
+            &nand_logger,
+            audio_ring[tail].samples,
+            AUDIO_CHUNK_SAMPLES,
+            timestamp_ms);
+
+    mic_diag.last_nand_append_status = (int32_t)append_status;
+    mic_diag.page_sequence_after_last_append = nand_logger.page_sequence;
+
+    if (mic_diag.page_sequence_after_last_append >= mic_diag.page_sequence_before_last_append)
+    {
+        page_delta = mic_diag.page_sequence_after_last_append -
+                     mic_diag.page_sequence_before_last_append;
+    }
+    else
+    {
+        page_delta = 0U;
+    }
+
+    mic_diag.last_page_sequence_delta = page_delta;
+    mic_diag.last_nand_append_tick_ms = HAL_GetTick();
+
+    if (append_status == LOG_OK)
+    {
+        audio_ring_tail = next_tail;
+        mic_diag.audio_chunks_dequeued++;
+        mic_diag.nand_append_ok_count++;
+
+        if (page_delta == 1U)
+        {
+            mic_diag.audio_pages_confirmed_written++;
+        }
+    }
+    else
+    {
+        mic_diag.nand_append_error_count++;
+    }
+
+    return append_status;
+}
+
+static LogStatus Audio_DrainQueuedChunks(uint32_t timestamp_ms)
+{
+    LogStatus status = LOG_OK;
+
+    while (audio_ring_tail != audio_ring_head)
+    {
+        status = Audio_AppendNextQueuedChunk(timestamp_ms);
+        if (status != LOG_OK)
+        {
+            break;
+        }
+    }
+
+    return status;
 }
 
 static void UpdateStateLed(AppState state)
@@ -313,7 +493,20 @@ static void MicDiagnostics_UpdateErrorCodes(void)
     }
 }
 
-//--michrophone acquisition complete callback: set flag and stop acquisition to prevent overwriting buffer before processing ----//
+void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
+{
+    if (hmdf != &MdfHandle0)
+    {
+        return;
+    }
+
+    mic_diag.dma_half_complete_count++;
+    mic_diag.dma_complete_count++;
+    mic_diag.last_dma_complete_tick_ms = HAL_GetTick();
+
+    AudioRing_EnqueueFromIsr(&audio_dma_buffer[0]);
+}
+
 void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 {
     if (hmdf != &MdfHandle0)
@@ -321,24 +514,11 @@ void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
         return;
     }
 
+    mic_diag.dma_full_complete_count++;
     mic_diag.dma_complete_count++;
     mic_diag.last_dma_complete_tick_ms = HAL_GetTick();
 
-
-    if (current_state == STATE_ACQUISITION)
-    {
-        if (audio_buffer_ready != 0U)
-        {
-            mic_diag.buffer_drop_or_overwrite_count++;
-        }
-
-        audio_buffer_ready = 1U;
-        mic_diag.buffer_ready_count++;
-    }
-    else
-    {
-        audio_buffer_ready = 0U;
-    }
+    AudioRing_EnqueueFromIsr(&audio_dma_buffer[AUDIO_CHUNK_SAMPLES]);
 }
 
 void HAL_MDF_ErrorCallback(MDF_HandleTypeDef *hmdf)
@@ -356,11 +536,13 @@ static void StopAcquisition(void)
 {
     uint32_t stop_ms = HAL_GetTick();
     LogStatus flush_status;
+    LogStatus drain_status;
     HAL_StatusTypeDef stop_status;
 
     HAL_TIM_Base_Stop_IT(&htim2);
 
     mic_diag.session_stop_tick_ms = stop_ms;
+    audio_accept_chunks = 0U;
 
     if (microphone_active)
     {
@@ -372,16 +554,25 @@ static void StopAcquisition(void)
         if (stop_status == HAL_OK)
         {
             mic_diag.mdf_stop_ok_count++;
+            mic_diag.dma_session_stop_ok_count++;
+            mic_diag.final_partial_chunk_discarded_count++;
         }
         else
         {
             mic_diag.mdf_stop_error_count++;
+            mic_diag.dma_session_stop_error_count++;
         }
 
         microphone_active = 0U;
     }
 
-    audio_buffer_ready = 0U;
+    mic_diag.audio_ring_count_at_stop = AudioRing_Count();
+    drain_status = Audio_DrainQueuedChunks(stop_ms);
+    if (drain_status != LOG_OK)
+    {
+        LED_On(LED_RED);
+    }
+
     sensor_tick_pending = 0U;
     stop_acquisition_requested = 0U;
 
@@ -658,8 +849,8 @@ MX_SPI3_Init();
   LED_Off(LED_RED);
 
   /* USER CODE END 2 */
-  mic_dma_config.Address    = (uint32_t)audio_buffer;
-  mic_dma_config.DataLength = AUDIO_BUFFER_SIZE * sizeof(int16_t);
+  mic_dma_config.Address    = (uint32_t)audio_dma_buffer;
+  mic_dma_config.DataLength = AUDIO_DMA_BUFFER_SAMPLES * sizeof(int16_t);
   mic_dma_config.MsbOnly    = ENABLE;
   
   /* Infinite loop */
@@ -677,6 +868,8 @@ MX_SPI3_Init();
 
         if (start_acquisition_requested)
         {
+          HAL_StatusTypeDef start_status;
+
           start_acquisition_requested = 0U;
 
           if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
@@ -703,12 +896,41 @@ MX_SPI3_Init();
           light_samples_saved = 0U;
           light_samples_discarded = 0U;
 
-          audio_buffer_ready = 0U;
+          AudioRing_Reset();
           microphone_active = 0U;
           stop_acquisition_requested = 0U;
           current_state = STATE_ACQUISITION;
           UpdateStateLed(current_state);
-          HAL_TIM_Base_Start_IT(&htim2);
+
+          mic_dma_config.Address    = (uint32_t)audio_dma_buffer;
+          mic_dma_config.DataLength = AUDIO_DMA_BUFFER_SAMPLES * sizeof(int16_t);
+          mic_dma_config.MsbOnly    = ENABLE;
+
+          audio_accept_chunks = 1U;
+          mic_diag.dma_start_attempt_count++;
+          mic_diag.last_dma_start_tick_ms = HAL_GetTick();
+
+          start_status = HAL_MDF_AcqStart_DMA(&MdfHandle0,
+                                              &MdfFilterConfig0,
+                                              &mic_dma_config);
+
+          mic_diag.last_dma_start_status = (int32_t)start_status;
+          MicDiagnostics_UpdateErrorCodes();
+
+          if (start_status == HAL_OK)
+          {
+            mic_diag.dma_start_ok_count++;
+            mic_diag.dma_session_start_ok_count++;
+            microphone_active = 1U;
+            HAL_TIM_Base_Start_IT(&htim2);
+          }
+          else
+          {
+            audio_accept_chunks = 0U;
+            mic_diag.dma_start_error_count++;
+            mic_diag.dma_session_start_error_count++;
+            Error_Handler();
+          }
 
           break;
         }
@@ -736,7 +958,7 @@ MX_SPI3_Init();
           microphone_active = 0U;
         }
 
-        audio_buffer_ready = 0U;
+        audio_accept_chunks = 0U;
 
         if (usb_flag)
         {
@@ -753,6 +975,20 @@ MX_SPI3_Init();
               StopAcquisition();
               break;
           }
+
+          if ((audio_ring_tail != audio_ring_head) &&
+              (current_state == STATE_ACQUISITION))
+          {
+            LogStatus append_status;
+
+            append_status = Audio_AppendNextQueuedChunk(Time_ToMilliseconds(timestamp));
+            if (append_status != LOG_OK)
+            {
+                StopAcquisition();
+                LED_On(LED_RED);
+                break;
+            }
+          }
           
           if ((sensor_tick_pending > 0U) &&
                   (current_state == STATE_ACQUISITION) &&
@@ -765,108 +1001,9 @@ MX_SPI3_Init();
           if (stop_acquisition_requested)
           {
             stop_acquisition_requested = 0U;
-            StopAcquisition();
-            break;
+              StopAcquisition();
+              break;
           }  
-        
-         if (audio_buffer_ready && current_state == STATE_ACQUISITION)
-          {
-            HAL_StatusTypeDef stop_status;
-            LogStatus append_status;
-            uint32_t page_delta;
-
-            /*
-            * Il DMA normal ha completato il buffer, ma in modalità
-            * MDF_MODE_ASYNC_CONT il filtro hardware rimane attivo.
-            * Deve essere fermato prima di poter avviare il DMA successivo.
-            */
-            mic_diag.mdf_stop_attempt_count++;
-            stop_status = HAL_MDF_AcqStop_DMA(&MdfHandle0);
-            mic_diag.last_mdf_stop_status = (int32_t)stop_status;
-            MicDiagnostics_UpdateErrorCodes();
-
-            if (stop_status == HAL_OK)
-            {
-                mic_diag.mdf_stop_ok_count++;
-                microphone_active = 0U;
-            }
-            else
-            {
-                mic_diag.mdf_stop_error_count++;
-                Error_Handler();
-            }
-
-            audio_buffer_ready = 0U;
-
-            mic_diag.nand_append_attempt_count++;
-            mic_diag.page_sequence_before_last_append = nand_logger.page_sequence;
-
-            append_status = NANDLogger_AppendAudioBuffer(
-                    &nand_logger,
-                    audio_buffer,
-                    AUDIO_BUFFER_SIZE,
-                    Time_ToMilliseconds(timestamp));
-
-            mic_diag.last_nand_append_status = (int32_t)append_status;
-            mic_diag.page_sequence_after_last_append = nand_logger.page_sequence;
-
-            if (mic_diag.page_sequence_after_last_append >= mic_diag.page_sequence_before_last_append)
-            {
-                page_delta = mic_diag.page_sequence_after_last_append -
-                             mic_diag.page_sequence_before_last_append;
-            }
-            else
-            {
-                page_delta = 0U;
-            }
-
-            mic_diag.last_page_sequence_delta = page_delta;
-            mic_diag.last_nand_append_tick_ms = HAL_GetTick();
-
-            if (append_status == LOG_OK)
-            {
-                mic_diag.nand_append_ok_count++;
-
-                if (page_delta == 1U)
-                {
-                    mic_diag.audio_pages_confirmed_written++;
-                }
-            }
-            else
-            {
-                mic_diag.nand_append_error_count++;
-                StopAcquisition();
-                LED_On(LED_RED);
-            }
-          }
-          else if ((audio_buffer_ready == 0U) &&
-                    (microphone_active == 0U) &&
-                    (current_state == STATE_ACQUISITION))
-          {
-            HAL_StatusTypeDef start_status;
-
-            mic_diag.dma_start_attempt_count++;
-            mic_diag.last_dma_start_tick_ms = HAL_GetTick();
-
-            start_status = HAL_MDF_AcqStart_DMA(&MdfHandle0,
-                                                &MdfFilterConfig0,
-                                                &mic_dma_config);
-
-            mic_diag.last_dma_start_status = (int32_t)start_status;
-            MicDiagnostics_UpdateErrorCodes();
-
-            if (start_status == HAL_OK)
-            {
-              mic_diag.dma_start_ok_count++;
-            }
-            else
-            {
-              mic_diag.dma_start_error_count++;
-              Error_Handler();
-            }
-
-            microphone_active = 1U;
-          }
 
           break;
 
