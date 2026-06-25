@@ -658,18 +658,29 @@ MX_SPI3_Init();
             break;
           }  
         
-          if (audio_buffer_ready && current_state == STATE_ACQUISITION)
+         if (audio_buffer_ready && current_state == STATE_ACQUISITION)
           {
+            /*
+            * Il DMA normal ha completato il buffer, ma in modalità
+            * MDF_MODE_ASYNC_CONT il filtro hardware rimane attivo.
+            * Deve essere fermato prima di poter avviare il DMA successivo.
+            */
+            if (HAL_MDF_AcqStop_DMA(&MdfHandle0) != HAL_OK)
+            {
+                Error_Handler();
+            }
+
             audio_buffer_ready = 0U;
 
-            if (NANDLogger_AppendAudioBuffer(&nand_logger,
-                                 audio_buffer,
-                                 AUDIO_BUFFER_SIZE,
-                                 Time_ToMilliseconds(timestamp)) != LOG_OK)
-            {
-              StopAcquisition();
-              LED_On(LED_RED);
-            }
+            if (NANDLogger_AppendAudioBuffer(
+                    &nand_logger,
+                    audio_buffer,
+                    AUDIO_BUFFER_SIZE,
+                    Time_ToMilliseconds(timestamp)) != LOG_OK)
+                {
+                StopAcquisition();
+                LED_On(LED_RED);
+                }
           }
           else if (!microphone_active && current_state == STATE_ACQUISITION)
           {
@@ -942,7 +953,7 @@ static void MX_MDF1_Init(void)
   MdfHandle0.Init.CommonParam.OutputClock.Activation = ENABLE;
   MdfHandle0.Init.CommonParam.OutputClock.Pins = MDF_OUTPUT_CLOCK_ALL;
   MdfHandle0.Init.CommonParam.OutputClock.Divider = 5;
-  MdfHandle0.Init.CommonParam.OutputClock.Trigger.Activation = ENABLE;
+  MdfHandle0.Init.CommonParam.OutputClock.Trigger.Activation = DISABLE; 
   MdfHandle0.Init.CommonParam.OutputClock.Trigger.Source = MDF_CLOCK_TRIG_TRGO;
   MdfHandle0.Init.CommonParam.OutputClock.Trigger.Edge = MDF_CLOCK_TRIG_FALLING_EDGE;
   MdfHandle0.Init.SerialInterface.Activation = ENABLE;
@@ -972,7 +983,7 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.HighPassFilter.CutOffFrequency = MDF_HPF_CUTOFF_0_000625FPCM;
   MdfFilterConfig0.Integrator.Activation = DISABLE;
   MdfFilterConfig0.SoundActivity.Activation = DISABLE;
-  MdfFilterConfig0.AcquisitionMode = MDF_MODE_SYNC_CONT;
+  MdfFilterConfig0.AcquisitionMode = MDF_MODE_ASYNC_CONT;
   MdfFilterConfig0.FifoThreshold = MDF_FIFO_THRESHOLD_NOT_EMPTY;
   MdfFilterConfig0.DiscardSamples = 255;
   MdfFilterConfig0.Trigger.Source = MDF_CLOCK_TRIG_TRGO;

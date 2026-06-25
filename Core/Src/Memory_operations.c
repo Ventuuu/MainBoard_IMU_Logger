@@ -1100,7 +1100,6 @@ LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
                                        uint32_t timestamp_ms)
 {
     
-    LED_On(LED_RED);
     
     uint32_t audio_bytes;
     
