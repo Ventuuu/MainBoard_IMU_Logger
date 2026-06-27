@@ -12,7 +12,7 @@
 #include "as7341_driver.h"
 
 /* TODO_CALIBRATION: replace after experimental calibration */
-#define AS7341_PROCESSING_GAIN AS7341_GAIN_64X
+#define AS7341_PROCESSING_GAIN AS7341_GAIN_8X
 
 /* TODO_CALIBRATION: replace after experimental calibration */
 #define AS7341_PROCESSING_ATIME 9U
