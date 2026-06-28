@@ -88,10 +88,16 @@ typedef enum
 #define LOG_LIGHT_RAW_RECORDS_PER_PAGE (LOG_SENSOR_PAYLOAD_BYTES / LOG_LIGHT_RAW_RECORD_BYTES)
 #define LOG_LIGHT_RAW_MAX_PAYLOAD_BYTES (LOG_LIGHT_RAW_RECORDS_PER_PAGE * LOG_LIGHT_RAW_RECORD_BYTES)
 #define LOG_LIGHT_RAW_PADDING_BYTES (LOG_SENSOR_PAYLOAD_BYTES - LOG_LIGHT_RAW_MAX_PAYLOAD_BYTES)
+#define LOG_AUDIO_FEATURE_RECORD_BYTES 24U
+#define LOG_AUDIO_FEATURE_RECORDS_PER_PAGE \
+    (LOG_SENSOR_PAYLOAD_BYTES / LOG_AUDIO_FEATURE_RECORD_BYTES)
+#define LOG_AUDIO_FEATURE_MAX_PAYLOAD_BYTES \
+    (LOG_AUDIO_FEATURE_RECORDS_PER_PAGE * LOG_AUDIO_FEATURE_RECORD_BYTES)
 
 #define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
 #define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
 #define LOG_MAGIC_LIGHT_RAW 0x5741524CUL  /* 'LRAW' */
+#define LOG_MAGIC_AUDIO_FEATURE 0x41454641UL  /* 'AFEA' */
 
 typedef struct __attribute__((packed))
 {
@@ -122,6 +128,48 @@ typedef struct __attribute__((packed))
 _Static_assert(sizeof(LightRawSampleRecord) == LOG_LIGHT_RAW_RECORD_BYTES,
                "Unexpected LightRawSampleRecord size");
 
+typedef struct __attribute__((packed))
+{
+    uint32_t window_sequence;
+    uint32_t window_start_ms;
+    uint16_t sample_count;
+    int16_t mean_counts_rounded;
+    int16_t rms_z_centi_dbfs;
+    int16_t rms_a_centi_dbfs;
+    int16_t estimated_laeq_centi_dba;
+    int16_t peak_centi_dbfs;
+    uint16_t clipped_sample_count;
+    uint8_t environment_class;
+    uint8_t flags;
+} AudioFeatureRecordV1;
+
+_Static_assert(sizeof(AudioFeatureRecordV1) == LOG_AUDIO_FEATURE_RECORD_BYTES,
+               "Unexpected AudioFeatureRecordV1 size");
+_Static_assert(offsetof(AudioFeatureRecordV1, window_sequence) == 0U,
+               "Unexpected AFEA window_sequence offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, window_start_ms) == 4U,
+               "Unexpected AFEA window_start_ms offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, sample_count) == 8U,
+               "Unexpected AFEA sample_count offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, mean_counts_rounded) == 10U,
+               "Unexpected AFEA mean_counts_rounded offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, rms_z_centi_dbfs) == 12U,
+               "Unexpected AFEA rms_z_centi_dbfs offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, rms_a_centi_dbfs) == 14U,
+               "Unexpected AFEA rms_a_centi_dbfs offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, estimated_laeq_centi_dba) == 16U,
+               "Unexpected AFEA estimated_laeq_centi_dba offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, peak_centi_dbfs) == 18U,
+               "Unexpected AFEA peak_centi_dbfs offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, clipped_sample_count) == 20U,
+               "Unexpected AFEA clipped_sample_count offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, environment_class) == 22U,
+               "Unexpected AFEA environment_class offset");
+_Static_assert(offsetof(AudioFeatureRecordV1, flags) == 23U,
+               "Unexpected AFEA flags offset");
+_Static_assert(LOG_AUDIO_FEATURE_RECORDS_PER_PAGE == 170U,
+               "Unexpected AFEA page capacity");
+
 typedef struct
 {
     uint16_t good_blocks[NAND_TOTAL_BLOCKS];
@@ -138,6 +186,11 @@ typedef struct
     uint8_t light_raw_page_buffer[NAND_PAGE_SIZE_BYTES];
     uint16_t light_raw_records_in_page;
     uint16_t light_raw_payload_bytes;
+
+    uint8_t audio_feature_page_buffer[NAND_PAGE_SIZE_BYTES];
+    uint16_t audio_feature_records_in_page;
+    uint16_t audio_feature_payload_bytes;
+    uint32_t audio_feature_first_timestamp_ms;
 
     uint32_t light_pages_written;
     uint32_t light_partial_pages_flushed;
@@ -165,6 +218,11 @@ extern volatile uint32_t usb_tx_fail_count;
 extern volatile uint32_t usb_tx_timeout_count;
 extern volatile uint16_t usb_tx_last_length;
 extern volatile uint8_t usb_tx_last_status;
+extern volatile uint32_t audio_feature_records_generated;
+extern volatile uint32_t audio_feature_records_buffered;
+extern volatile uint32_t audio_feature_records_persisted;
+extern volatile uint32_t audio_feature_page_flush_count;
+extern volatile uint32_t audio_feature_page_flush_errors;
 
 LogStatus NANDLogger_Init(NandLogger *logger);
 
@@ -181,6 +239,9 @@ LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
                                        uint32_t audio_samples,
                                        uint32_t timestamp_ms);
 
+LogStatus NANDLogger_AppendAudioFeatureRecord(NandLogger *logger,
+                                              const AudioFeatureRecordV1 *record);
+
 LogStatus NANDLogger_AppendLightRawRecord(NandLogger *logger,
                                           const LightRawSampleRecord *record,
                                           uint32_t timestamp_ms);
@@ -188,6 +249,8 @@ LogStatus NANDLogger_AppendLightRawRecord(NandLogger *logger,
 LogStatus NANDLogger_DownloadAll(NandLogger *logger);
 LogStatus NANDLogger_Flush(NandLogger *logger, uint32_t timestamp_ms);
 LogStatus NANDLogger_FlushLightRaw(NandLogger *logger, uint32_t timestamp_ms);
+LogStatus NANDLogger_FlushAudioFeatures(NandLogger *logger);
+LogStatus NANDLogger_FlushWindowData(NandLogger *logger, uint32_t timestamp_ms);
 LogStatus NANDLogger_FlushAll(NandLogger *logger, uint32_t timestamp_ms);
 
 void NANDLogger_SerializeLightRawRecordForTest(uint8_t *dst,

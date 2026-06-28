@@ -8,6 +8,7 @@
  * - Sensor pages are marked with LOG_MAGIC_SENSOR = 'SENS'.
  * - Audio pages are marked with LOG_MAGIC_AUDIO  = 'AUD0'.
  * - Raw light pages are marked with LOG_MAGIC_LIGHT_RAW = 'LRAW'.
+ * - Audio feature pages are marked with LOG_MAGIC_AUDIO_FEATURE = 'AFEA'.
  *
  * Page format:
  *
@@ -27,6 +28,9 @@
  *
  * Raw light page payload:
  *  - up to 145 28-byte little-endian LightRawSampleRecord records.
+ *
+ * Audio feature page payload:
+ *  - up to 170 packed 24-byte AudioFeatureRecordV1 records.
  */
 
 #include "string.h"
@@ -156,6 +160,12 @@ volatile uint32_t usb_tx_fail_count = 0U;
 volatile uint32_t usb_tx_timeout_count = 0U;
 volatile uint16_t usb_tx_last_length = 0U;
 volatile uint8_t usb_tx_last_status = 0U;
+
+volatile uint32_t audio_feature_records_generated = 0U;
+volatile uint32_t audio_feature_records_buffered = 0U;
+volatile uint32_t audio_feature_records_persisted = 0U;
+volatile uint32_t audio_feature_page_flush_count = 0U;
+volatile uint32_t audio_feature_page_flush_errors = 0U;
 
 volatile uint32_t nand_erase_attempts = 0U;
 volatile uint32_t nand_erase_failures = 0U;
@@ -888,6 +898,62 @@ static LogStatus logger_flush_light_raw_page(NandLogger *logger,
     return status;
 }
 
+static LogStatus logger_flush_audio_feature_page(NandLogger *logger)
+{
+    uint16_t record_count;
+    uint16_t payload_bytes;
+    LogStatus status;
+
+    if (logger == NULL)
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    record_count = logger->audio_feature_records_in_page;
+    if (record_count == 0U)
+    {
+        if (logger->audio_feature_payload_bytes == 0U)
+        {
+            return LOG_OK;
+        }
+
+        audio_feature_page_flush_errors++;
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    payload_bytes = (uint16_t)(record_count * LOG_AUDIO_FEATURE_RECORD_BYTES);
+    if ((record_count > LOG_AUDIO_FEATURE_RECORDS_PER_PAGE) ||
+        (payload_bytes != logger->audio_feature_payload_bytes) ||
+        (payload_bytes > LOG_AUDIO_FEATURE_MAX_PAYLOAD_BYTES))
+    {
+        audio_feature_page_flush_errors++;
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    logger_prepare_header(logger->audio_feature_page_buffer,
+                          LOG_MAGIC_AUDIO_FEATURE,
+                          payload_bytes,
+                          logger->page_sequence,
+                          logger->audio_feature_first_timestamp_ms);
+
+    status = logger_write_current_page(logger,
+                                       logger->audio_feature_page_buffer);
+    if (status != LOG_OK)
+    {
+        audio_feature_page_flush_errors++;
+        return status;
+    }
+
+    audio_feature_records_persisted += record_count;
+    audio_feature_page_flush_count++;
+    logger->audio_feature_records_in_page = 0U;
+    logger->audio_feature_payload_bytes = 0U;
+    logger->audio_feature_first_timestamp_ms = 0U;
+    memset(logger->audio_feature_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
+
+    return LOG_OK;
+}
+
 
 /* -------------------------------------------------------------------------- */
 /*                       New public logger functions                          */
@@ -933,9 +999,19 @@ LogStatus NANDLogger_Init(NandLogger *logger)
     logger->sensor_records_in_page = 0U;
     logger->light_raw_records_in_page = 0U;
     logger->light_raw_payload_bytes = 0U;
+    logger->audio_feature_records_in_page = 0U;
+    logger->audio_feature_payload_bytes = 0U;
+    logger->audio_feature_first_timestamp_ms = 0U;
+
+    audio_feature_records_generated = 0U;
+    audio_feature_records_buffered = 0U;
+    audio_feature_records_persisted = 0U;
+    audio_feature_page_flush_count = 0U;
+    audio_feature_page_flush_errors = 0U;
 
     memset(logger->sensor_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
     logger_reset_light_raw_page_buffer(logger, 0U);
+    memset(logger->audio_feature_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
 
     return LOG_OK;
 }
@@ -992,6 +1068,9 @@ LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger)
     logger->sensor_records_in_page = 0U;
     logger->light_raw_records_in_page = 0U;
     logger->light_raw_payload_bytes = 0U;
+    logger->audio_feature_records_in_page = 0U;
+    logger->audio_feature_payload_bytes = 0U;
+    logger->audio_feature_first_timestamp_ms = 0U;
     logger->light_pages_written = 0U;
     logger->light_partial_pages_flushed = 0U;
     logger->light_full_pages_flushed = 0U;
@@ -1020,9 +1099,15 @@ LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger)
     light_wrong_buffer_failures = 0U;
     light_serialization_buffer_address = 0U;
     light_programmed_buffer_address = 0U;
+    audio_feature_records_generated = 0U;
+    audio_feature_records_buffered = 0U;
+    audio_feature_records_persisted = 0U;
+    audio_feature_page_flush_count = 0U;
+    audio_feature_page_flush_errors = 0U;
 
     memset(logger->sensor_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
     logger_reset_light_raw_page_buffer(logger, 0U);
+    memset(logger->audio_feature_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
 
     return LOG_OK;
 }
@@ -1147,6 +1232,67 @@ LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
                 logger_audio_page_buffer);   
             }
 
+LogStatus NANDLogger_AppendAudioFeatureRecord(NandLogger *logger,
+                                              const AudioFeatureRecordV1 *record)
+{
+    uint32_t payload_offset;
+    LogStatus status;
+
+    if ((logger == NULL) || (record == NULL))
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    if ((logger->audio_feature_records_in_page >
+         LOG_AUDIO_FEATURE_RECORDS_PER_PAGE) ||
+        (logger->audio_feature_payload_bytes !=
+         (logger->audio_feature_records_in_page *
+          LOG_AUDIO_FEATURE_RECORD_BYTES)))
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    if (logger->audio_feature_records_in_page >=
+        LOG_AUDIO_FEATURE_RECORDS_PER_PAGE)
+    {
+        status = logger_flush_audio_feature_page(logger);
+        if (status != LOG_OK)
+        {
+            return status;
+        }
+    }
+
+    if (logger->audio_feature_records_in_page == 0U)
+    {
+        memset(logger->audio_feature_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
+        logger->audio_feature_first_timestamp_ms = record->window_start_ms;
+    }
+
+    payload_offset = LOG_HEADER_SIZE_BYTES +
+                     logger->audio_feature_payload_bytes;
+    if ((payload_offset + LOG_AUDIO_FEATURE_RECORD_BYTES) >
+        NAND_PAGE_SIZE_BYTES)
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    memcpy(&logger->audio_feature_page_buffer[payload_offset],
+           record,
+           LOG_AUDIO_FEATURE_RECORD_BYTES);
+
+    logger->audio_feature_records_in_page++;
+    logger->audio_feature_payload_bytes += LOG_AUDIO_FEATURE_RECORD_BYTES;
+    audio_feature_records_buffered++;
+
+    if (logger->audio_feature_records_in_page >=
+        LOG_AUDIO_FEATURE_RECORDS_PER_PAGE)
+    {
+        return logger_flush_audio_feature_page(logger);
+    }
+
+    return LOG_OK;
+}
+
 LogStatus NANDLogger_AppendLightRawRecord(NandLogger *logger,
                                           const LightRawSampleRecord *record,
                                           uint32_t timestamp_ms)
@@ -1243,7 +1389,12 @@ LogStatus NANDLogger_FlushLightRaw(NandLogger *logger, uint32_t timestamp_ms)
     return logger_flush_light_raw_page(logger, timestamp_ms);
 }
 
-LogStatus NANDLogger_FlushAll(NandLogger *logger, uint32_t timestamp_ms)
+LogStatus NANDLogger_FlushAudioFeatures(NandLogger *logger)
+{
+    return logger_flush_audio_feature_page(logger);
+}
+
+LogStatus NANDLogger_FlushWindowData(NandLogger *logger, uint32_t timestamp_ms)
 {
     LogStatus status;
 
@@ -1254,6 +1405,19 @@ LogStatus NANDLogger_FlushAll(NandLogger *logger, uint32_t timestamp_ms)
     }
 
     return logger_flush_light_raw_page(logger, timestamp_ms);
+}
+
+LogStatus NANDLogger_FlushAll(NandLogger *logger, uint32_t timestamp_ms)
+{
+    LogStatus status;
+
+    status = NANDLogger_FlushWindowData(logger, timestamp_ms);
+    if (status != LOG_OK)
+    {
+        return status;
+    }
+
+    return logger_flush_audio_feature_page(logger);
 }
 
 static LogStatus logger_usb_send(const uint8_t *data, uint16_t len)
@@ -1449,13 +1613,7 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
         return LOG_ERR_BAD_ARGUMENT;
     }
 
-    /*
-     * Prima del download, salva eventuale pagina sensori parziale.
-     *
-     * Esempio:
-     * se hai 37 record sensori in RAM ma non hai ancora raggiunto 102 record,
-     * senza flush quei 37 record non sarebbero in NAND.
-     */
+    /* Flush all partial SENS, LRAW and AFEA pages before counting the dump. */
     status = NANDLogger_FlushAll(logger, HAL_GetTick());
     if (status != LOG_OK)
     {

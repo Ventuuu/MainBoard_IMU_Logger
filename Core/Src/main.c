@@ -30,6 +30,8 @@
 /* USER CODE BEGIN Includes */
 #include "string.h"
 #include "stdio.h"
+#include <math.h>
+#include <stdint.h>
 #include "../../USB_Device/App/usb_device.h"
 #include "SPI.h"
 #include "SPI_NAND.h"
@@ -79,6 +81,29 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 #define AUDIO_CHUNK_SAMPLES 1024U
 #define AUDIO_DMA_BUFFER_SAMPLES (2U * AUDIO_CHUNK_SAMPLES)
 #define AUDIO_RING_SLOT_COUNT 32U
+#define AUDIO_WINDOW_TARGET_SAMPLES 24000U
+#define AUDIO_WINDOW_REQUIRED_CHUNKS \
+    ((AUDIO_WINDOW_TARGET_SAMPLES + AUDIO_CHUNK_SAMPLES - 1U) / AUDIO_CHUNK_SAMPLES)
+#define AUDIO_WINDOW_PERIOD_MS 10000U
+#define AUDIO_BASIC_FEATURE_HISTORY_CAPACITY 16U
+#define AUDIO_SAMPLE_RATE_HZ 48000U
+/* Approximate 1 kHz host calibration offset; this is not a certified SPL meter. */
+#define AUDIO_SPL_CALIBRATION_OFFSET_DB 122.40
+#ifndef AUDIO_STORE_RAW_PCM
+#define AUDIO_STORE_RAW_PCM 1U
+#endif
+#ifndef AUDIO_STORE_FEATURE_RECORD
+#define AUDIO_STORE_FEATURE_RECORD 1U
+#endif
+#define AUDIO_DB_CENTI_INVALID INT16_MIN
+
+#define AUDIO_FLAG_COMPLETE (1U << 0)
+#define AUDIO_FLAG_ACQUISITION_VALID (1U << 1)
+#define AUDIO_FLAG_A_WEIGHTED_FEATURE_VALID (1U << 2)
+#define AUDIO_FLAG_CLIPPED (1U << 3)
+#define AUDIO_FLAG_HIGH_LEVEL (1U << 4)
+#define AUDIO_FLAG_SILENT_OR_UNAVAILABLE (1U << 5)
+#define AUDIO_FLAG_IMPULSIVE_EVENT (1U << 6)
 #define LIGHT_SUBSAMPLE_TICKS 8U
 #define USER_BUTTON_DEBOUNCE_MS 250U
 #define NAND_STARTUP_SELF_TEST_ENABLE 0U
@@ -88,8 +113,97 @@ typedef struct
     int16_t samples[AUDIO_CHUNK_SAMPLES];
 } AudioRingSlot;
 
+typedef enum
+{
+    AUDIO_ENV_VERY_QUIET = 0,
+    AUDIO_ENV_QUIET = 1,
+    AUDIO_ENV_MODERATE = 2,
+    AUDIO_ENV_LIVELY = 3,
+    AUDIO_ENV_NOISY = 4,
+    AUDIO_ENV_VERY_NOISY = 5,
+    AUDIO_ENV_HIGH_EXPOSURE = 6,
+    AUDIO_ENV_UNAVAILABLE = 255
+} AudioEnvironmentClass;
+
+typedef struct
+{
+    double b0;
+    double b1;
+    double b2;
+    double a1;
+    double a2;
+} AudioBiquadCoefficients;
+
+typedef struct
+{
+    double s1;
+    double s2;
+} AudioBiquadState;
+
+typedef struct
+{
+    uint32_t window_index;
+    uint32_t window_start_ms;
+    uint32_t sample_count;
+
+    double mean_counts;
+    double rms_zero_mean_counts;
+    double rms_zero_mean_dbfs;
+
+    uint32_t absolute_peak_counts;
+    double peak_dbfs;
+
+    uint32_t clipped_sample_count;
+    double clipped_sample_percentage;
+
+    double a_weighted_rms_counts;
+    double a_weighted_rms_dbfs;
+    double estimated_laeq_dba;
+
+    uint8_t environment_class;
+    uint8_t audio_flags;
+    uint8_t acquisition_valid;
+    uint8_t a_weighting_valid;
+    uint8_t record_valid;
+
+    uint8_t complete;
+    uint8_t valid;
+} AudioBasicFeatureDebug;
+
+/*
+ * Denominator convention: 1 + a1*z^-1 + a2*z^-2. The DF-II transposed
+ * state updates therefore subtract a1*y and a2*y.
+ * Jens Hee, "A-weighting filter for 44.1 and 48 kHz sampling", 2019.
+ */
+static const AudioBiquadCoefficients audio_a_weighting_biquads[3] =
+{
+    {0.96525096525, -1.34730163086, 0.38205066561,
+     -1.34730722798, 0.34905752979},
+    {0.94696969696, -1.89393939393, 0.94696969696,
+     -1.89387049481, 0.89515976917},
+    {0.64666542810, -0.38362237137, -0.26304305672,
+     -1.34730722798, 0.34905752979}
+};
+
 static int16_t audio_dma_buffer[AUDIO_DMA_BUFFER_SAMPLES];
 static AudioRingSlot audio_ring[AUDIO_RING_SLOT_COUNT];
+static int16_t audio_window_pcm[AUDIO_WINDOW_TARGET_SAMPLES];
+
+volatile uint32_t audio_window_pcm_samples = 0U;
+AudioBasicFeatureDebug audio_basic_feature_latest;
+AudioBasicFeatureDebug audio_basic_feature_history[AUDIO_BASIC_FEATURE_HISTORY_CAPACITY];
+volatile uint32_t audio_basic_features_computed = 0U;
+volatile uint32_t audio_basic_features_invalid = 0U;
+volatile uint32_t audio_basic_feature_history_write_index = 0U;
+volatile uint32_t audio_basic_feature_history_count = 0U;
+volatile uint32_t audio_basic_feature_processing_last_ms = 0U;
+volatile uint32_t audio_basic_feature_processing_max_ms = 0U;
+volatile uint32_t audio_a_weighting_computed = 0U;
+volatile uint32_t audio_a_weighting_invalid = 0U;
+volatile uint32_t audio_a_weighting_processing_last_ms = 0U;
+volatile uint32_t audio_a_weighting_processing_max_ms = 0U;
+volatile uint32_t audio_total_feature_processing_last_ms = 0U;
+volatile uint32_t audio_total_feature_processing_max_ms = 0U;
 
 MDF_DmaConfigTypeDef mic_dma_config;
 
@@ -120,6 +234,22 @@ typedef struct
     uint32_t audio_ring_overflow_count;
     uint32_t audio_ring_high_watermark;
     uint32_t audio_ring_count_at_stop;
+
+    uint32_t audio_window_target_samples;
+    uint32_t audio_dma_samples_produced;
+    uint32_t audio_window_chunks_published;
+    uint32_t audio_window_samples_published;
+    uint32_t audio_window_samples_accepted;
+    uint32_t audio_samples_discarded_beyond_window;
+    uint32_t audio_samples_discarded_during_stop;
+    uint32_t audio_ring_overflow_samples;
+
+    uint32_t audio_window_stop_request_count;
+    uint32_t audio_window_target_stop_request_count;
+    uint32_t audio_windows_completed;
+    uint32_t audio_windows_incomplete;
+    uint32_t audio_window_target_reached;
+    uint32_t audio_window_incomplete;
 
     uint32_t dma_session_start_ok_count;
     uint32_t dma_session_start_error_count;
@@ -155,6 +285,22 @@ typedef struct
 } MicDiagnostics;
 
 volatile MicDiagnostics mic_diag;
+
+volatile uint32_t audio_windows_requested = 0U;
+volatile uint32_t audio_windows_started = 0U;
+volatile uint32_t audio_windows_completed = 0U;
+volatile uint32_t audio_windows_incomplete = 0U;
+volatile uint32_t audio_windows_missed = 0U;
+volatile uint32_t audio_scheduler_first_deadline_ms = 0U;
+volatile uint32_t audio_scheduler_next_deadline_ms = 0U;
+volatile uint32_t audio_window_last_start_ms = 0U;
+volatile uint32_t audio_window_previous_start_ms = 0U;
+volatile uint32_t audio_window_start_interval_ms = 0U;
+
+static uint8_t audio_scheduler_enabled = 0U;
+static uint8_t audio_scheduler_last_busy_interval_valid = 0U;
+static uint32_t audio_scheduler_last_busy_start_ms = 0U;
+static uint32_t audio_scheduler_last_busy_end_ms = 0U;
 
 // --- State Machine ---
 static volatile AppState current_state = STATE_IDLE;
@@ -236,19 +382,32 @@ static uint32_t AudioRing_Count(void);
 static void AudioRing_EnqueueFromIsr(const int16_t *samples);
 static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms);
 static LogStatus Audio_DrainQueuedChunks(uint32_t timestamp_ms);
+static AudioBasicFeatureDebug Audio_ComputeBasicFeatures(
+        const int16_t *samples,
+        uint32_t sample_count);
+static uint8_t Audio_ComputeAWeightedFeatures(
+        const int16_t *samples,
+        uint32_t sample_count,
+        uint32_t sample_rate_hz,
+        double mean_counts,
+        double *rms_counts,
+        double *rms_dbfs);
+static AudioEnvironmentClass Audio_ClassifyEnvironment(double estimated_laeq_dba);
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+static AudioFeatureRecordV1 Audio_BuildFeatureRecord(
+        const AudioBasicFeatureDebug *features);
+#endif
+static void Audio_PublishBasicFeatures(uint8_t window_complete,
+                                       LogStatus drain_status);
+static void AudioScheduler_Init(void);
+static void AudioScheduler_Process(uint32_t now_ms);
+static void AudioScheduler_RecordWindowStart(uint32_t start_ms);
+static void AudioScheduler_RecordWindowEnd(uint32_t end_ms);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-static uint32_t Time_ToMilliseconds(Time_Struct t)
-{
-    return ((uint32_t)t.hh * 3600000UL) +
-           ((uint32_t)t.mm * 60000UL) +
-           ((uint32_t)t.ss * 1000UL) +
-           ((uint32_t)t.sss);
-}
 
 static Time_Struct Time_FromElapsedMilliseconds(uint32_t elapsed_ms)
 {
@@ -260,6 +419,105 @@ static Time_Struct Time_FromElapsedMilliseconds(uint32_t elapsed_ms)
     t.sss = (uint16_t)(elapsed_ms % 1000U);
 
     return t;
+}
+
+static uint8_t AudioScheduler_DeadlineWasBusy(uint32_t deadline_ms)
+{
+    uint32_t busy_duration_ms;
+    uint32_t deadline_offset_ms;
+
+    if (audio_scheduler_last_busy_interval_valid == 0U)
+    {
+        return 0U;
+    }
+
+    busy_duration_ms = audio_scheduler_last_busy_end_ms -
+                       audio_scheduler_last_busy_start_ms;
+    deadline_offset_ms = deadline_ms - audio_scheduler_last_busy_start_ms;
+
+    return (deadline_offset_ms <= busy_duration_ms) ? 1U : 0U;
+}
+
+static void AudioScheduler_Init(void)
+{
+    uint32_t now_ms = HAL_GetTick();
+
+    audio_windows_requested = 0U;
+    audio_windows_started = 0U;
+    audio_windows_completed = 0U;
+    audio_windows_incomplete = 0U;
+    audio_windows_missed = 0U;
+    audio_window_last_start_ms = 0U;
+    audio_window_previous_start_ms = 0U;
+    audio_window_start_interval_ms = 0U;
+
+    audio_scheduler_first_deadline_ms = now_ms;
+    audio_scheduler_next_deadline_ms = now_ms;
+    audio_scheduler_last_busy_start_ms = 0U;
+    audio_scheduler_last_busy_end_ms = 0U;
+    audio_scheduler_last_busy_interval_valid = 0U;
+    audio_scheduler_enabled = 1U;
+}
+
+static void AudioScheduler_Process(uint32_t now_ms)
+{
+    uint32_t due_deadlines;
+    uint32_t elapsed_ms;
+    uint8_t can_start;
+    uint8_t deadline_was_busy;
+
+    if ((audio_scheduler_enabled == 0U) ||
+        ((int32_t)(now_ms - audio_scheduler_next_deadline_ms) < 0))
+    {
+        return;
+    }
+
+    elapsed_ms = now_ms - audio_scheduler_next_deadline_ms;
+    due_deadlines = (elapsed_ms / AUDIO_WINDOW_PERIOD_MS) + 1U;
+    audio_windows_requested += due_deadlines;
+
+    can_start = ((current_state == STATE_IDLE) &&
+                 (usb_flag == 0U) &&
+                 (start_acquisition_requested == 0U) &&
+                 (stop_acquisition_requested == 0U) &&
+                 (microphone_active == 0U)) ? 1U : 0U;
+
+    deadline_was_busy = AudioScheduler_DeadlineWasBusy(
+            audio_scheduler_next_deadline_ms);
+
+    if ((due_deadlines == 1U) &&
+        (can_start != 0U) &&
+        (deadline_was_busy == 0U))
+    {
+        start_acquisition_requested = 1U;
+        start_request_count++;
+    }
+    else
+    {
+        audio_windows_missed += due_deadlines;
+    }
+
+    audio_scheduler_next_deadline_ms += due_deadlines * AUDIO_WINDOW_PERIOD_MS;
+}
+
+static void AudioScheduler_RecordWindowStart(uint32_t start_ms)
+{
+    if (audio_windows_started != 0U)
+    {
+        audio_window_previous_start_ms = audio_window_last_start_ms;
+        audio_window_start_interval_ms = start_ms - audio_window_last_start_ms;
+    }
+
+    audio_window_last_start_ms = start_ms;
+    audio_windows_started++;
+    audio_scheduler_last_busy_start_ms = start_ms;
+    audio_scheduler_last_busy_interval_valid = 0U;
+}
+
+static void AudioScheduler_RecordWindowEnd(uint32_t end_ms)
+{
+    audio_scheduler_last_busy_end_ms = end_ms;
+    audio_scheduler_last_busy_interval_valid = 1U;
 }
 
 static uint32_t AudioRing_CountFrom(uint32_t head, uint32_t tail)
@@ -302,8 +560,21 @@ static void AudioRing_EnqueueFromIsr(const int16_t *samples)
     uint32_t tail;
     uint32_t next_head;
 
-    if ((current_state != STATE_ACQUISITION) || (audio_accept_chunks == 0U))
+    if (current_state != STATE_ACQUISITION)
     {
+        return;
+    }
+
+    if (audio_accept_chunks == 0U)
+    {
+        if (mic_diag.audio_window_target_reached != 0U)
+        {
+            mic_diag.audio_samples_discarded_beyond_window += AUDIO_CHUNK_SAMPLES;
+        }
+        else
+        {
+            mic_diag.audio_samples_discarded_during_stop += AUDIO_CHUNK_SAMPLES;
+        }
         return;
     }
 
@@ -318,6 +589,7 @@ static void AudioRing_EnqueueFromIsr(const int16_t *samples)
     if (next_head == tail)
     {
         mic_diag.audio_ring_overflow_count++;
+        mic_diag.audio_ring_overflow_samples += AUDIO_CHUNK_SAMPLES;
         mic_diag.buffer_drop_or_overwrite_count++;
         return;
     }
@@ -327,16 +599,440 @@ static void AudioRing_EnqueueFromIsr(const int16_t *samples)
 
     audio_ring_head = next_head;
     mic_diag.audio_chunks_enqueued++;
+    mic_diag.audio_window_chunks_published++;
+    mic_diag.audio_window_samples_published += AUDIO_CHUNK_SAMPLES;
     mic_diag.buffer_ready_count++;
     AudioRing_UpdateHighWatermark(AudioRing_CountFrom(next_head, tail));
+
+    if ((mic_diag.audio_window_chunks_published >= AUDIO_WINDOW_REQUIRED_CHUNKS) &&
+        (mic_diag.audio_window_target_reached == 0U))
+    {
+        mic_diag.audio_window_target_reached = 1U;
+        audio_accept_chunks = 0U;
+        __DMB();
+
+        if (stop_acquisition_requested == 0U)
+        {
+            stop_acquisition_requested = 1U;
+            mic_diag.audio_window_stop_request_count++;
+            mic_diag.audio_window_target_stop_request_count++;
+        }
+    }
+}
+
+static AudioBasicFeatureDebug Audio_ComputeBasicFeatures(
+        const int16_t *samples,
+        uint32_t sample_count)
+{
+    AudioBasicFeatureDebug features = {0};
+    int64_t sample_sum = 0;
+    double centered_energy = 0.0;
+    uint32_t absolute_peak = 0U;
+    uint32_t clipped_count = 0U;
+
+    features.sample_count = sample_count;
+    features.rms_zero_mean_dbfs = -INFINITY;
+    features.peak_dbfs = -INFINITY;
+    features.a_weighted_rms_dbfs = -INFINITY;
+    features.estimated_laeq_dba = -INFINITY;
+    features.environment_class = (uint8_t)AUDIO_ENV_UNAVAILABLE;
+
+    if ((samples == NULL) || (sample_count == 0U))
+    {
+        return features;
+    }
+
+    for (uint32_t i = 0U; i < sample_count; i++)
+    {
+        sample_sum += samples[i];
+    }
+
+    features.mean_counts = (double)sample_sum / (double)sample_count;
+
+    for (uint32_t i = 0U; i < sample_count; i++)
+    {
+        int32_t sample = samples[i];
+        uint32_t magnitude = (sample < 0) ? (uint32_t)(-sample) : (uint32_t)sample;
+        double centered = (double)sample - features.mean_counts;
+
+        centered_energy += centered * centered;
+
+        if (magnitude > absolute_peak)
+        {
+            absolute_peak = magnitude;
+        }
+
+        if ((sample == INT16_MIN) || (sample == INT16_MAX))
+        {
+            clipped_count++;
+        }
+    }
+
+    features.rms_zero_mean_counts = sqrt(centered_energy / (double)sample_count);
+    features.absolute_peak_counts = absolute_peak;
+    features.clipped_sample_count = clipped_count;
+    features.clipped_sample_percentage =
+            (100.0 * (double)clipped_count) / (double)sample_count;
+
+    if (features.rms_zero_mean_counts > 0.0)
+    {
+        features.rms_zero_mean_dbfs =
+                20.0 * log10(features.rms_zero_mean_counts / 32768.0);
+    }
+
+    if (absolute_peak > 0U)
+    {
+        features.peak_dbfs = 20.0 * log10((double)absolute_peak / 32768.0);
+    }
+
+    return features;
+}
+
+static uint8_t Audio_ComputeAWeightedFeatures(
+        const int16_t *samples,
+        uint32_t sample_count,
+        uint32_t sample_rate_hz,
+        double mean_counts,
+        double *rms_counts,
+        double *rms_dbfs)
+{
+    AudioBiquadState states[3] = {{0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}};
+    double weighted_energy = 0.0;
+    double mean_square;
+
+    if ((rms_counts == NULL) || (rms_dbfs == NULL))
+    {
+        return 0U;
+    }
+
+    *rms_counts = 0.0;
+    *rms_dbfs = -INFINITY;
+
+    if ((samples == NULL) || (sample_count == 0U) ||
+        (sample_rate_hz != AUDIO_SAMPLE_RATE_HZ) ||
+        !isfinite(mean_counts))
+    {
+        return 0U;
+    }
+
+    /* Each window is isolated by about 9.5 s, so all biquad states start at zero. */
+    for (uint32_t i = 0U; i < sample_count; i++)
+    {
+        double section_input = (double)samples[i] - mean_counts;
+
+        for (uint32_t section = 0U; section < 3U; section++)
+        {
+            const AudioBiquadCoefficients *coefficients =
+                    &audio_a_weighting_biquads[section];
+            double output = coefficients->b0 * section_input + states[section].s1;
+            double next_s1 = coefficients->b1 * section_input -
+                             coefficients->a1 * output + states[section].s2;
+            double next_s2 = coefficients->b2 * section_input -
+                             coefficients->a2 * output;
+
+            if (!isfinite(output) || !isfinite(next_s1) || !isfinite(next_s2))
+            {
+                return 0U;
+            }
+
+            states[section].s1 = next_s1;
+            states[section].s2 = next_s2;
+            section_input = output;
+        }
+
+        weighted_energy += section_input * section_input;
+        if (!isfinite(weighted_energy) || (weighted_energy < 0.0))
+        {
+            return 0U;
+        }
+    }
+
+    mean_square = weighted_energy / (double)sample_count;
+    if (!isfinite(mean_square) || (mean_square < 0.0))
+    {
+        return 0U;
+    }
+
+    *rms_counts = sqrt(mean_square);
+    if (!isfinite(*rms_counts) || (*rms_counts <= 0.0))
+    {
+        *rms_counts = 0.0;
+        return 0U;
+    }
+
+    *rms_dbfs = 20.0 * log10(*rms_counts / 32768.0);
+    if (!isfinite(*rms_dbfs))
+    {
+        *rms_dbfs = -INFINITY;
+        return 0U;
+    }
+
+    return 1U;
+}
+
+static AudioEnvironmentClass Audio_ClassifyEnvironment(double estimated_laeq_dba)
+{
+    if (!isfinite(estimated_laeq_dba))
+    {
+        return AUDIO_ENV_UNAVAILABLE;
+    }
+
+    if (estimated_laeq_dba < 35.0) return AUDIO_ENV_VERY_QUIET;
+    if (estimated_laeq_dba < 45.0) return AUDIO_ENV_QUIET;
+    if (estimated_laeq_dba < 55.0) return AUDIO_ENV_MODERATE;
+    if (estimated_laeq_dba < 65.0) return AUDIO_ENV_LIVELY;
+    if (estimated_laeq_dba < 75.0) return AUDIO_ENV_NOISY;
+    if (estimated_laeq_dba < 85.0) return AUDIO_ENV_VERY_NOISY;
+
+    return AUDIO_ENV_HIGH_EXPOSURE;
+}
+
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+static int16_t Audio_RoundSaturateInt16(double value)
+{
+    double rounded;
+
+    if (!isfinite(value))
+    {
+        return 0;
+    }
+
+    rounded = round(value);
+    if (rounded <= (double)INT16_MIN) return INT16_MIN;
+    if (rounded >= (double)INT16_MAX) return INT16_MAX;
+
+    return (int16_t)rounded;
+}
+
+static int16_t Audio_DbToCenti(double value_db)
+{
+    double scaled;
+    double rounded;
+
+    if (!isfinite(value_db))
+    {
+        return AUDIO_DB_CENTI_INVALID;
+    }
+
+    scaled = value_db * 100.0;
+    if (!isfinite(scaled))
+    {
+        return AUDIO_DB_CENTI_INVALID;
+    }
+
+    rounded = round(scaled);
+    if (rounded <= (double)(INT16_MIN + 1)) return (int16_t)(INT16_MIN + 1);
+    if (rounded >= (double)INT16_MAX) return INT16_MAX;
+
+    return (int16_t)rounded;
+}
+
+static AudioFeatureRecordV1 Audio_BuildFeatureRecord(
+        const AudioBasicFeatureDebug *features)
+{
+    AudioFeatureRecordV1 record = {0};
+
+    if (features == NULL)
+    {
+        record.rms_z_centi_dbfs = AUDIO_DB_CENTI_INVALID;
+        record.rms_a_centi_dbfs = AUDIO_DB_CENTI_INVALID;
+        record.estimated_laeq_centi_dba = AUDIO_DB_CENTI_INVALID;
+        record.peak_centi_dbfs = AUDIO_DB_CENTI_INVALID;
+        record.environment_class = (uint8_t)AUDIO_ENV_UNAVAILABLE;
+        return record;
+    }
+
+    record.window_sequence = features->window_index;
+    record.window_start_ms = features->window_start_ms;
+    record.sample_count = (features->sample_count <= UINT16_MAX) ?
+                          (uint16_t)features->sample_count : UINT16_MAX;
+    record.mean_counts_rounded = Audio_RoundSaturateInt16(features->mean_counts);
+    record.rms_z_centi_dbfs = Audio_DbToCenti(features->rms_zero_mean_dbfs);
+    record.rms_a_centi_dbfs = Audio_DbToCenti(features->a_weighted_rms_dbfs);
+    record.estimated_laeq_centi_dba = Audio_DbToCenti(features->estimated_laeq_dba);
+    record.peak_centi_dbfs = Audio_DbToCenti(features->peak_dbfs);
+    record.clipped_sample_count =
+            (features->clipped_sample_count <= UINT16_MAX) ?
+            (uint16_t)features->clipped_sample_count : UINT16_MAX;
+    record.environment_class = features->environment_class;
+    record.flags = features->audio_flags;
+
+    return record;
+}
+#endif
+
+static void Audio_PublishBasicFeatures(uint8_t window_complete,
+                                       LogStatus drain_status)
+{
+    AudioBasicFeatureDebug features;
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+    AudioFeatureRecordV1 feature_record;
+#endif
+    uint32_t total_processing_start_ms;
+    uint32_t basic_processing_start_ms;
+    uint32_t a_weighting_start_ms;
+    uint32_t processing_elapsed_ms;
+    uint32_t history_index;
+    uint8_t z_values_are_finite;
+
+    total_processing_start_ms = HAL_GetTick();
+    basic_processing_start_ms = HAL_GetTick();
+    features = Audio_ComputeBasicFeatures(
+            audio_window_pcm,
+            audio_window_pcm_samples);
+    processing_elapsed_ms = HAL_GetTick() - basic_processing_start_ms;
+
+    audio_basic_feature_processing_last_ms = processing_elapsed_ms;
+    if (processing_elapsed_ms > audio_basic_feature_processing_max_ms)
+    {
+        audio_basic_feature_processing_max_ms = processing_elapsed_ms;
+    }
+
+    features.window_index = audio_windows_started;
+    features.window_start_ms = audio_window_last_start_ms;
+    features.complete =
+            ((window_complete != 0U) &&
+             (features.sample_count == AUDIO_WINDOW_TARGET_SAMPLES)) ? 1U : 0U;
+
+    features.acquisition_valid =
+            ((features.sample_count == mic_diag.audio_window_samples_accepted) &&
+             (drain_status == LOG_OK) &&
+             (mic_diag.audio_ring_overflow_count == 0U) &&
+             (mic_diag.last_dma_start_status == (int32_t)HAL_OK) &&
+             (mic_diag.last_mdf_stop_status == (int32_t)HAL_OK) &&
+             (mic_diag.last_mdf_error_code == 0U) &&
+             (mic_diag.last_dma_error_code == 0U)) ? 1U : 0U;
+
+    z_values_are_finite =
+            (isfinite(features.mean_counts) &&
+             isfinite(features.rms_zero_mean_counts) &&
+             isfinite(features.rms_zero_mean_dbfs) &&
+             isfinite(features.peak_dbfs) &&
+             isfinite(features.clipped_sample_percentage)) ? 1U : 0U;
+
+    features.valid =
+            ((features.sample_count == AUDIO_WINDOW_TARGET_SAMPLES) &&
+             (features.complete != 0U) &&
+             (features.acquisition_valid != 0U) &&
+             (z_values_are_finite != 0U)) ? 1U : 0U;
+
+    a_weighting_start_ms = HAL_GetTick();
+    features.a_weighting_valid = Audio_ComputeAWeightedFeatures(
+            audio_window_pcm,
+            audio_window_pcm_samples,
+            AUDIO_SAMPLE_RATE_HZ,
+            features.mean_counts,
+            &features.a_weighted_rms_counts,
+            &features.a_weighted_rms_dbfs);
+    processing_elapsed_ms = HAL_GetTick() - a_weighting_start_ms;
+
+    audio_a_weighting_processing_last_ms = processing_elapsed_ms;
+    if (processing_elapsed_ms > audio_a_weighting_processing_max_ms)
+    {
+        audio_a_weighting_processing_max_ms = processing_elapsed_ms;
+    }
+
+    audio_a_weighting_computed++;
+    if (features.a_weighting_valid != 0U)
+    {
+        features.estimated_laeq_dba =
+                features.a_weighted_rms_dbfs +
+                AUDIO_SPL_CALIBRATION_OFFSET_DB;
+        if (!isfinite(features.estimated_laeq_dba))
+        {
+            features.estimated_laeq_dba = -INFINITY;
+            features.a_weighting_valid = 0U;
+        }
+    }
+
+    if (features.a_weighting_valid == 0U)
+    {
+        audio_a_weighting_invalid++;
+    }
+
+    features.environment_class = (uint8_t)Audio_ClassifyEnvironment(
+            features.estimated_laeq_dba);
+    features.audio_flags = 0U;
+
+    if (features.complete != 0U)
+        features.audio_flags |= AUDIO_FLAG_COMPLETE;
+    if (features.acquisition_valid != 0U)
+        features.audio_flags |= AUDIO_FLAG_ACQUISITION_VALID;
+    if (features.a_weighting_valid != 0U)
+        features.audio_flags |= AUDIO_FLAG_A_WEIGHTED_FEATURE_VALID;
+    if (features.clipped_sample_count > 0U)
+        features.audio_flags |= AUDIO_FLAG_CLIPPED;
+    if (isfinite(features.estimated_laeq_dba) &&
+        (features.estimated_laeq_dba >= 85.0))
+        features.audio_flags |= AUDIO_FLAG_HIGH_LEVEL;
+    if (features.a_weighting_valid == 0U)
+        features.audio_flags |= AUDIO_FLAG_SILENT_OR_UNAVAILABLE;
+
+    features.record_valid =
+            ((features.complete != 0U) &&
+             (features.acquisition_valid != 0U) &&
+             (features.valid != 0U) &&
+             (features.a_weighting_valid != 0U)) ? 1U : 0U;
+
+    history_index = audio_basic_feature_history_write_index;
+    audio_basic_feature_history[history_index] = features;
+    audio_basic_feature_latest = features;
+
+    history_index++;
+    if (history_index >= AUDIO_BASIC_FEATURE_HISTORY_CAPACITY)
+    {
+        history_index = 0U;
+    }
+    audio_basic_feature_history_write_index = history_index;
+
+    if (audio_basic_feature_history_count < AUDIO_BASIC_FEATURE_HISTORY_CAPACITY)
+    {
+        audio_basic_feature_history_count++;
+    }
+
+    audio_basic_features_computed++;
+    if (features.valid == 0U)
+    {
+        audio_basic_features_invalid++;
+    }
+
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+    feature_record = Audio_BuildFeatureRecord(&features);
+    audio_feature_records_generated++;
+#endif
+
+    processing_elapsed_ms = HAL_GetTick() - total_processing_start_ms;
+    audio_total_feature_processing_last_ms = processing_elapsed_ms;
+    if (processing_elapsed_ms > audio_total_feature_processing_max_ms)
+    {
+        audio_total_feature_processing_max_ms = processing_elapsed_ms;
+    }
+
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+    if (NANDLogger_AppendAudioFeatureRecord(&nand_logger,
+                                            &feature_record) != LOG_OK)
+    {
+        LED_On(LED_RED);
+    }
+#endif
 }
 
 static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
 {
-    LogStatus append_status;
+    LogStatus append_status = LOG_OK;
     uint32_t tail;
     uint32_t next_tail;
-    uint32_t page_delta;
+#if (AUDIO_STORE_RAW_PCM != 0U)
+    uint32_t page_delta = 0U;
+#endif
+    uint32_t remaining_samples;
+    uint32_t accepted_samples;
+    uint32_t discarded_samples;
+    uint32_t window_offset;
+
+#if (AUDIO_STORE_RAW_PCM == 0U)
+    (void)timestamp_ms;
+#endif
 
     if (audio_ring_tail == audio_ring_head)
     {
@@ -351,46 +1047,77 @@ static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
         next_tail = 0U;
     }
 
-    mic_diag.nand_append_attempt_count++;
-    mic_diag.page_sequence_before_last_append = nand_logger.page_sequence;
-
-    append_status = NANDLogger_AppendAudioBuffer(
-            &nand_logger,
-            audio_ring[tail].samples,
-            AUDIO_CHUNK_SAMPLES,
-            timestamp_ms);
-
-    mic_diag.last_nand_append_status = (int32_t)append_status;
-    mic_diag.page_sequence_after_last_append = nand_logger.page_sequence;
-
-    if (mic_diag.page_sequence_after_last_append >= mic_diag.page_sequence_before_last_append)
+    if (mic_diag.audio_window_samples_accepted < mic_diag.audio_window_target_samples)
     {
-        page_delta = mic_diag.page_sequence_after_last_append -
-                     mic_diag.page_sequence_before_last_append;
+        remaining_samples = mic_diag.audio_window_target_samples -
+                            mic_diag.audio_window_samples_accepted;
+        accepted_samples = (remaining_samples < AUDIO_CHUNK_SAMPLES) ?
+                           remaining_samples : AUDIO_CHUNK_SAMPLES;
     }
     else
     {
-        page_delta = 0U;
+        accepted_samples = 0U;
     }
 
-    mic_diag.last_page_sequence_delta = page_delta;
-    mic_diag.last_nand_append_tick_ms = HAL_GetTick();
+    discarded_samples = AUDIO_CHUNK_SAMPLES - accepted_samples;
 
-    if (append_status == LOG_OK)
+    if (accepted_samples > 0U)
     {
-        audio_ring_tail = next_tail;
-        mic_diag.audio_chunks_dequeued++;
-        mic_diag.nand_append_ok_count++;
-
-        if (page_delta == 1U)
+        window_offset = audio_window_pcm_samples;
+        if ((window_offset > AUDIO_WINDOW_TARGET_SAMPLES) ||
+            (accepted_samples > (AUDIO_WINDOW_TARGET_SAMPLES - window_offset)))
         {
-            mic_diag.audio_pages_confirmed_written++;
+            return LOG_ERR_BAD_ARGUMENT;
         }
+
+        memcpy(&audio_window_pcm[window_offset],
+               audio_ring[tail].samples,
+               accepted_samples * sizeof(int16_t));
+
+        mic_diag.audio_window_samples_accepted += accepted_samples;
+        audio_window_pcm_samples = window_offset + accepted_samples;
+
+#if (AUDIO_STORE_RAW_PCM != 0U)
+        mic_diag.nand_append_attempt_count++;
+        mic_diag.page_sequence_before_last_append = nand_logger.page_sequence;
+
+        append_status = NANDLogger_AppendAudioBuffer(
+                &nand_logger,
+                audio_ring[tail].samples,
+                accepted_samples,
+                timestamp_ms);
+
+        mic_diag.last_nand_append_status = (int32_t)append_status;
+        mic_diag.page_sequence_after_last_append = nand_logger.page_sequence;
+
+        if (mic_diag.page_sequence_after_last_append >= mic_diag.page_sequence_before_last_append)
+        {
+            page_delta = mic_diag.page_sequence_after_last_append -
+                         mic_diag.page_sequence_before_last_append;
+        }
+
+        mic_diag.last_page_sequence_delta = page_delta;
+        mic_diag.last_nand_append_tick_ms = HAL_GetTick();
+
+        if (append_status != LOG_OK)
+        {
+            mic_diag.nand_append_error_count++;
+        }
+        else
+        {
+            mic_diag.nand_append_ok_count++;
+
+            if (page_delta == 1U)
+            {
+                mic_diag.audio_pages_confirmed_written++;
+            }
+        }
+#endif
     }
-    else
-    {
-        mic_diag.nand_append_error_count++;
-    }
+
+    mic_diag.audio_samples_discarded_beyond_window += discarded_samples;
+    audio_ring_tail = next_tail;
+    mic_diag.audio_chunks_dequeued++;
 
     return append_status;
 }
@@ -398,17 +1125,18 @@ static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
 static LogStatus Audio_DrainQueuedChunks(uint32_t timestamp_ms)
 {
     LogStatus status = LOG_OK;
+    LogStatus first_error = LOG_OK;
 
     while (audio_ring_tail != audio_ring_head)
     {
         status = Audio_AppendNextQueuedChunk(timestamp_ms);
-        if (status != LOG_OK)
+        if ((status != LOG_OK) && (first_error == LOG_OK))
         {
-            break;
+            first_error = status;
         }
     }
 
-    return status;
+    return first_error;
 }
 
 static void UpdateStateLed(AppState state)
@@ -502,6 +1230,7 @@ void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
 
     mic_diag.dma_half_complete_count++;
     mic_diag.dma_complete_count++;
+    mic_diag.audio_dma_samples_produced += AUDIO_CHUNK_SAMPLES;
     mic_diag.last_dma_complete_tick_ms = HAL_GetTick();
 
     AudioRing_EnqueueFromIsr(&audio_dma_buffer[0]);
@@ -516,6 +1245,7 @@ void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
 
     mic_diag.dma_full_complete_count++;
     mic_diag.dma_complete_count++;
+    mic_diag.audio_dma_samples_produced += AUDIO_CHUNK_SAMPLES;
     mic_diag.last_dma_complete_tick_ms = HAL_GetTick();
 
     AudioRing_EnqueueFromIsr(&audio_dma_buffer[AUDIO_CHUNK_SAMPLES]);
@@ -538,6 +1268,7 @@ static void StopAcquisition(void)
     LogStatus flush_status;
     LogStatus drain_status;
     HAL_StatusTypeDef stop_status;
+    uint8_t window_complete;
 
     HAL_TIM_Base_Stop_IT(&htim2);
 
@@ -573,17 +1304,36 @@ static void StopAcquisition(void)
         LED_On(LED_RED);
     }
 
+    if (mic_diag.audio_window_samples_accepted == mic_diag.audio_window_target_samples)
+    {
+        mic_diag.audio_windows_completed++;
+        mic_diag.audio_window_incomplete = 0U;
+        audio_windows_completed++;
+        window_complete = 1U;
+    }
+    else
+    {
+        mic_diag.audio_windows_incomplete++;
+        mic_diag.audio_window_incomplete = 1U;
+        audio_windows_incomplete++;
+        window_complete = 0U;
+    }
+
+    Audio_PublishBasicFeatures(window_complete, drain_status);
+
     sensor_tick_pending = 0U;
     stop_acquisition_requested = 0U;
 
     current_state = STATE_IDLE;
     UpdateStateLed(current_state);
 
-    flush_status = NANDLogger_FlushAll(&nand_logger, stop_ms);
+    flush_status = NANDLogger_FlushWindowData(&nand_logger, stop_ms);
     if (flush_status != LOG_OK)
     {
         LED_On(LED_RED);
     }
+
+    AudioScheduler_RecordWindowEnd(HAL_GetTick());
 }
 
 static LogStatus AcquireAndStoreLightRawSample(void)
@@ -817,6 +1567,11 @@ MX_SPI3_Init();
   }
 #endif
 
+  if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
+  {
+    Error_Handler();
+  }
+
 
   if(IMU_Init() == 1) {
     IMU_ConfigAccelerometer(ACC_ODR_52HZ, ACC_FS_2G, 1);
@@ -847,6 +1602,7 @@ MX_SPI3_Init();
   }
 
   LED_Off(LED_RED);
+  AudioScheduler_Init();
 
   /* USER CODE END 2 */
   mic_dma_config.Address    = (uint32_t)audio_dma_buffer;
@@ -860,6 +1616,7 @@ MX_SPI3_Init();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    AudioScheduler_Process(HAL_GetTick());
     UpdateStateLed(current_state);
 
 	  switch(current_state)
@@ -872,12 +1629,8 @@ MX_SPI3_Init();
 
           start_acquisition_requested = 0U;
 
-          if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
-          {
-            Error_Handler();
-          }
-
           memset((void *)&mic_diag, 0, sizeof(mic_diag));
+          mic_diag.audio_window_target_samples = AUDIO_WINDOW_TARGET_SAMPLES;
           mic_diag.session_start_tick_ms = HAL_GetTick();
 
           timestamp.hh = 0U;
@@ -896,6 +1649,7 @@ MX_SPI3_Init();
           light_samples_saved = 0U;
           light_samples_discarded = 0U;
 
+          audio_window_pcm_samples = 0U;
           AudioRing_Reset();
           microphone_active = 0U;
           stop_acquisition_requested = 0U;
@@ -922,6 +1676,7 @@ MX_SPI3_Init();
             mic_diag.dma_start_ok_count++;
             mic_diag.dma_session_start_ok_count++;
             microphone_active = 1U;
+            AudioScheduler_RecordWindowStart(mic_diag.last_dma_start_tick_ms);
             HAL_TIM_Base_Start_IT(&htim2);
           }
           else
@@ -976,20 +1731,6 @@ MX_SPI3_Init();
               break;
           }
 
-          if ((audio_ring_tail != audio_ring_head) &&
-              (current_state == STATE_ACQUISITION))
-          {
-            LogStatus append_status;
-
-            append_status = Audio_AppendNextQueuedChunk(Time_ToMilliseconds(timestamp));
-            if (append_status != LOG_OK)
-            {
-                StopAcquisition();
-                LED_On(LED_RED);
-                break;
-            }
-          }
-          
           if ((sensor_tick_pending > 0U) &&
                   (current_state == STATE_ACQUISITION) &&
                   (stop_acquisition_requested == 0U))
@@ -1073,12 +1814,8 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     switch(current_state)
     {
         case STATE_IDLE:
-        start_acquisition_requested = 1U;
-        start_request_count++;
-        break;
         case STATE_ACQUISITION:
-        stop_acquisition_requested = 1U;
-        stop_request_count++;
+        /* Monitoring is automatic; button presses are ignored in these states. */
         break;
         case STATE_USB_CONNECTED:
         exit_flag = 0;
