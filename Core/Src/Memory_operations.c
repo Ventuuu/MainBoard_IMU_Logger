@@ -170,11 +170,44 @@ volatile uint32_t audio_feature_records_buffered = 0U;
 volatile uint32_t audio_feature_records_persisted = 0U;
 volatile uint32_t audio_feature_page_flush_count = 0U;
 volatile uint32_t audio_feature_page_flush_errors = 0U;
+volatile uint32_t audio_feature_records_pending = 0U;
 volatile uint32_t light_feature_records_generated = 0U;
 volatile uint32_t light_feature_records_buffered = 0U;
 volatile uint32_t light_feature_records_persisted = 0U;
 volatile uint32_t light_feature_page_flush_count = 0U;
 volatile uint32_t light_feature_page_flush_errors = 0U;
+volatile uint32_t light_feature_records_pending = 0U;
+
+volatile uint8_t nand_recovery_started = 0U;
+volatile uint8_t nand_recovery_completed = 0U;
+volatile uint8_t nand_recovery_failed = 0U;
+volatile uint32_t nand_recovery_duration_ms = 0U;
+volatile uint32_t nand_recovery_pages_scanned = 0U;
+volatile uint32_t nand_recovery_valid_pages = 0U;
+volatile uint32_t nand_recovery_invalid_non_erased_pages = 0U;
+volatile uint32_t nand_recovery_unknown_valid_pages = 0U;
+volatile uint32_t nand_recovery_payload_remainder_pages = 0U;
+volatile uint32_t nand_recovered_used_pages = 0U;
+volatile uint32_t nand_recovered_next_physical_page = 0U;
+volatile uint32_t nand_recovered_highest_page_sequence = 0U;
+volatile uint32_t nand_recovered_next_page_sequence = 0U;
+volatile uint32_t nand_recovered_highest_window_sequence = 0U;
+volatile uint32_t nand_recovered_next_window_sequence = 1U;
+volatile uint8_t nand_storage_full = 0U;
+volatile uint8_t storage_full_latched = 0U;
+volatile uint32_t nand_write_failures = 0U;
+volatile uint32_t nand_recovery_read_failures = 0U;
+volatile int32_t nand_last_write_status = SPI_NAND_RET_OK;
+volatile int32_t nand_recovery_last_read_status = SPI_NAND_RET_OK;
+volatile NandRecoveryDiagnostics nand_recovery_latest =
+{
+    UINT32_MAX,
+    UINT32_MAX,
+    0U,
+    0U,
+    0U,
+    0U
+};
 
 volatile uint32_t nand_erase_attempts = 0U;
 volatile uint32_t nand_erase_failures = 0U;
@@ -556,6 +589,13 @@ static void logger_reset_light_raw_page_buffer(NandLogger *logger,
 }
 
 
+static void logger_latch_storage_full(void)
+{
+    nand_storage_full = 1U;
+    storage_full_latched = 1U;
+}
+
+
 static LogStatus logger_advance_page(NandLogger *logger)
 {
     if (logger == NULL)
@@ -618,6 +658,15 @@ static LogStatus logger_write_current_page(NandLogger *logger,
 
     if (logger->current_good_block_index >= logger->good_block_count)
     {
+        logger_latch_storage_full();
+        return LOG_ERR_FULL;
+    }
+
+    if ((logger->used_page_count >=
+         ((uint32_t)logger->good_block_count * NAND_PAGES_PER_BLOCK)) ||
+        (logger->page_sequence == UINT32_MAX))
+    {
+        logger_latch_storage_full();
         return LOG_ERR_FULL;
     }
 
@@ -633,15 +682,25 @@ static LogStatus logger_write_current_page(NandLogger *logger,
                                      column,
                                      page,
                                      NAND_PAGE_SIZE_BYTES);
+    nand_last_write_status = nand_ret;
 
     if (nand_ret != SPI_NAND_RET_OK)
     {
+        nand_write_failures++;
         return LOG_ERR_NAND;
     }
 
+    logger->used_page_count++;
     logger->page_sequence++;
+    (void)logger_advance_page(logger);
 
-    return logger_advance_page(logger);
+    if ((logger->current_good_block_index >= logger->good_block_count) ||
+        (logger->page_sequence == UINT32_MAX))
+    {
+        logger_latch_storage_full();
+    }
+
+    return LOG_OK;
 }
 
 static bool logger_light_raw_payload_is_consistent(const NandLogger *logger)
@@ -682,7 +741,8 @@ static void logger_note_light_payload_consistency_failure(NandLogger *logger)
 
 #if (NAND_VERIFY_LRAW_AFTER_WRITE != 0U)
 static LogStatus logger_verify_light_raw_page(const NandLogger *logger,
-                                              uint32_t page_sequence,
+                                              uint32_t logical_page,
+                                              uint32_t expected_page_sequence,
                                               const uint8_t *expected_page,
                                               uint16_t expected_payload_bytes)
 {
@@ -700,7 +760,7 @@ static LogStatus logger_verify_light_raw_page(const NandLogger *logger,
         return LOG_ERR_BAD_ARGUMENT;
     }
 
-    if (logger_logical_page_to_address(logger, page_sequence, &addr) != LOG_OK)
+    if (logger_logical_page_to_address(logger, logical_page, &addr) != LOG_OK)
     {
         return LOG_ERR_FULL;
     }
@@ -735,7 +795,7 @@ static LogStatus logger_verify_light_raw_page(const NandLogger *logger,
         (header.version != 1U) ||
         (header.header_size != LOG_HEADER_SIZE_BYTES) ||
         (header.payload_bytes != expected_payload_bytes) ||
-        (header.page_sequence != page_sequence) ||
+        (header.page_sequence != expected_page_sequence) ||
         ((header.payload_bytes % LOG_LIGHT_RAW_RECORD_BYTES) != 0U) ||
         (header.payload_bytes > LOG_LIGHT_RAW_MAX_PAYLOAD_BYTES))
     {
@@ -791,8 +851,11 @@ static LogStatus logger_flush_sensor_page(NandLogger *logger,
     status = logger_write_current_page(logger,
                                        logger->sensor_page_buffer);
 
-    logger->sensor_records_in_page = 0U;
-    memset(logger->sensor_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
+    if (status == LOG_OK)
+    {
+        logger->sensor_records_in_page = 0U;
+        memset(logger->sensor_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
+    }
 
     return status;
 }
@@ -802,6 +865,7 @@ static LogStatus logger_flush_light_raw_page(NandLogger *logger,
 {
     uint16_t payload_bytes;
     uint32_t page_sequence;
+    uint32_t logical_page;
     uint32_t valid_records;
     uint32_t first_bad_record;
     uint32_t first_partial_byte_offset;
@@ -845,6 +909,7 @@ static LogStatus logger_flush_light_raw_page(NandLogger *logger,
 
     payload_bytes = logger->light_raw_payload_bytes;
     page_sequence = logger->page_sequence;
+    logical_page = logger->used_page_count;
 
     logger_prepare_header(logger->light_raw_page_buffer,
                           LOG_MAGIC_LIGHT_RAW,
@@ -870,6 +935,7 @@ static LogStatus logger_flush_light_raw_page(NandLogger *logger,
     {
 #if (NAND_VERIFY_LRAW_AFTER_WRITE != 0U)
         if (logger_verify_light_raw_page(logger,
+                                         logical_page,
                                          page_sequence,
                                          logger->light_raw_page_buffer,
                                          payload_bytes) != LOG_OK)
@@ -954,6 +1020,14 @@ static LogStatus logger_flush_audio_feature_page(NandLogger *logger)
     }
 
     audio_feature_records_persisted += record_count;
+    if (audio_feature_records_pending >= record_count)
+    {
+        audio_feature_records_pending -= record_count;
+    }
+    else
+    {
+        audio_feature_records_pending = 0U;
+    }
     audio_feature_page_flush_count++;
     logger->audio_feature_records_in_page = 0U;
     logger->audio_feature_payload_bytes = 0U;
@@ -1010,6 +1084,14 @@ static LogStatus logger_flush_light_feature_page(NandLogger *logger)
     }
 
     light_feature_records_persisted += record_count;
+    if (light_feature_records_pending >= record_count)
+    {
+        light_feature_records_pending -= record_count;
+    }
+    else
+    {
+        light_feature_records_pending = 0U;
+    }
     light_feature_page_flush_count++;
     logger->light_feature_records_in_page = 0U;
     logger->light_feature_payload_bytes = 0U;
@@ -1028,6 +1110,7 @@ LogStatus NANDLogger_Init(NandLogger *logger)
 {
     read_address_t addr;
     bool is_bad_mark = true;
+    int bad_block_status;
 
     if (logger == NULL)
     {
@@ -1035,6 +1118,15 @@ LogStatus NANDLogger_Init(NandLogger *logger)
     }
 
     memset(logger, 0, sizeof(NandLogger));
+    nand_recovery_started = 1U;
+    nand_recovery_completed = 0U;
+    nand_recovery_failed = 0U;
+    nand_storage_full = 0U;
+    storage_full_latched = 0U;
+    nand_write_failures = 0U;
+    nand_recovery_read_failures = 0U;
+    nand_last_write_status = SPI_NAND_RET_OK;
+    nand_recovery_last_read_status = SPI_NAND_RET_OK;
 
     addr.page = 0U;
     addr.dummy = 0U;
@@ -1044,7 +1136,14 @@ LogStatus NANDLogger_Init(NandLogger *logger)
         addr.block = block;
         is_bad_mark = true;
 
-        spi_nand_block_is_bad(addr, &is_bad_mark);
+        bad_block_status = spi_nand_block_is_bad(addr, &is_bad_mark);
+        nand_recovery_last_read_status = bad_block_status;
+        if (bad_block_status != SPI_NAND_RET_OK)
+        {
+            nand_recovery_read_failures++;
+            nand_recovery_failed = 1U;
+            return LOG_ERR_NAND;
+        }
 
         if (!is_bad_mark)
         {
@@ -1055,12 +1154,14 @@ LogStatus NANDLogger_Init(NandLogger *logger)
 
     if (logger->good_block_count == 0U)
     {
+        nand_recovery_failed = 1U;
         return LOG_ERR_NO_GOOD_BLOCKS;
     }
 
     logger->current_good_block_index = 0U;
     logger->current_page_in_block = 0U;
     logger->page_sequence = 0U;
+    logger->used_page_count = 0U;
     logger->sensor_records_in_page = 0U;
     logger->light_raw_records_in_page = 0U;
     logger->light_raw_payload_bytes = 0U;
@@ -1076,11 +1177,13 @@ LogStatus NANDLogger_Init(NandLogger *logger)
     audio_feature_records_persisted = 0U;
     audio_feature_page_flush_count = 0U;
     audio_feature_page_flush_errors = 0U;
+    audio_feature_records_pending = 0U;
     light_feature_records_generated = 0U;
     light_feature_records_buffered = 0U;
     light_feature_records_persisted = 0U;
     light_feature_page_flush_count = 0U;
     light_feature_page_flush_errors = 0U;
+    light_feature_records_pending = 0U;
 
     memset(logger->sensor_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
     logger_reset_light_raw_page_buffer(logger, 0U);
@@ -1139,6 +1242,7 @@ LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger)
     logger->current_good_block_index = 0U;
     logger->current_page_in_block = 0U;
     logger->page_sequence = 0U;
+    logger->used_page_count = 0U;
     logger->sensor_records_in_page = 0U;
     logger->light_raw_records_in_page = 0U;
     logger->light_raw_payload_bytes = 0U;
@@ -1181,11 +1285,40 @@ LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger)
     audio_feature_records_persisted = 0U;
     audio_feature_page_flush_count = 0U;
     audio_feature_page_flush_errors = 0U;
+    audio_feature_records_pending = 0U;
     light_feature_records_generated = 0U;
     light_feature_records_buffered = 0U;
     light_feature_records_persisted = 0U;
     light_feature_page_flush_count = 0U;
     light_feature_page_flush_errors = 0U;
+    light_feature_records_pending = 0U;
+    nand_storage_full = 0U;
+    storage_full_latched = 0U;
+    nand_write_failures = 0U;
+    nand_last_write_status = SPI_NAND_RET_OK;
+    nand_recovery_started = 0U;
+    nand_recovery_completed = 0U;
+    nand_recovery_failed = 0U;
+    nand_recovery_duration_ms = 0U;
+    nand_recovery_pages_scanned = 0U;
+    nand_recovery_valid_pages = 0U;
+    nand_recovery_invalid_non_erased_pages = 0U;
+    nand_recovery_unknown_valid_pages = 0U;
+    nand_recovery_payload_remainder_pages = 0U;
+    nand_recovered_used_pages = 0U;
+    nand_recovered_next_physical_page = 0U;
+    nand_recovered_highest_page_sequence = 0U;
+    nand_recovered_next_page_sequence = 0U;
+    nand_recovered_highest_window_sequence = 0U;
+    nand_recovered_next_window_sequence = 1U;
+    nand_recovery_read_failures = 0U;
+    nand_recovery_last_read_status = SPI_NAND_RET_OK;
+    nand_recovery_latest.first_free_physical_page = 0U;
+    nand_recovery_latest.last_valid_physical_page = UINT32_MAX;
+    nand_recovery_latest.last_valid_magic = 0U;
+    nand_recovery_latest.last_valid_page_sequence = 0U;
+    nand_recovery_latest.last_afea_window_sequence = 0U;
+    nand_recovery_latest.last_lfea_window_sequence = 0U;
 
     memset(logger->sensor_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
     logger_reset_light_raw_page_buffer(logger, 0U);
@@ -1203,6 +1336,7 @@ LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,
                                         const uint8_t *light_raw)
 {
     uint32_t timestamp_ms;
+    LogStatus status;
 
     if ((logger == NULL) ||
         (accelerometer == NULL) ||
@@ -1214,7 +1348,18 @@ LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,
 
     if (logger->current_good_block_index >= logger->good_block_count)
     {
+        logger_latch_storage_full();
         return LOG_ERR_FULL;
+    }
+
+    if (logger->sensor_records_in_page >= LOG_SENSOR_RECORDS_PER_PAGE)
+    {
+        timestamp_ms = logger_time_to_ms(timestamp);
+        status = logger_flush_sensor_page(logger, timestamp_ms);
+        if (status != LOG_OK)
+        {
+            return status;
+        }
     }
 
     /*
@@ -1278,6 +1423,7 @@ LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
     
     if (logger->current_good_block_index >= logger->good_block_count)
     {
+        logger_latch_storage_full();
         return LOG_ERR_FULL;
     }
     
@@ -1366,6 +1512,7 @@ LogStatus NANDLogger_AppendAudioFeatureRecord(NandLogger *logger,
     logger->audio_feature_records_in_page++;
     logger->audio_feature_payload_bytes += LOG_AUDIO_FEATURE_RECORD_BYTES;
     audio_feature_records_buffered++;
+    audio_feature_records_pending++;
 
     if (logger->audio_feature_records_in_page >=
         LOG_AUDIO_FEATURE_RECORDS_PER_PAGE)
@@ -1427,6 +1574,7 @@ LogStatus NANDLogger_AppendLightFeatureRecord(NandLogger *logger,
     logger->light_feature_records_in_page++;
     logger->light_feature_payload_bytes += LOG_LIGHT_FEATURE_RECORD_BYTES;
     light_feature_records_buffered++;
+    light_feature_records_pending++;
 
     if (logger->light_feature_records_in_page >=
         LOG_LIGHT_FEATURE_RECORDS_PER_PAGE)
@@ -1451,6 +1599,7 @@ LogStatus NANDLogger_AppendLightRawRecord(NandLogger *logger,
 
     if (logger->current_good_block_index >= logger->good_block_count)
     {
+        logger_latch_storage_full();
         return LOG_ERR_FULL;
     }
 
@@ -1630,78 +1779,147 @@ static LogStatus logger_usb_send(const uint8_t *data, uint16_t len)
     return LOG_OK;
 }
 
-static bool logger_magic_is_valid(uint32_t magic)
+static bool logger_magic_is_recognized(uint32_t magic)
 {
     return (magic == LOG_MAGIC_SENSOR) ||
            (magic == LOG_MAGIC_AUDIO) ||
-           (magic == LOG_MAGIC_LIGHT_RAW);
+           (magic == LOG_MAGIC_AUDIO_FEATURE) ||
+           (magic == LOG_MAGIC_LIGHT_RAW) ||
+           (magic == LOG_MAGIC_LIGHT_FEATURE) ||
+           (magic == LOG_MAGIC_LIGHT_RESULT);
 }
 
-static bool logger_header_is_valid(const LogPageHeader *header)
+
+static bool logger_header_is_erased(const LogPageHeader *header)
+{
+    const uint8_t *bytes = (const uint8_t *)header;
+
+    if (header == NULL)
+    {
+        return false;
+    }
+
+    for (uint32_t i = 0U; i < sizeof(LogPageHeader); i++)
+    {
+        if (bytes[i] != 0xFFU)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+static bool logger_header_structure_is_valid(const LogPageHeader *header)
 {
     if (header == NULL)
     {
         return false;
     }
 
-    if (!logger_magic_is_valid(header->magic))
-    {
-        return false;
-    }
-
     if ((header->version != 1U) ||
         (header->header_size != LOG_HEADER_SIZE_BYTES) ||
+        (header->payload_bytes == 0U) ||
         (header->payload_bytes > LOG_SENSOR_PAYLOAD_BYTES))
     {
         return false;
     }
 
-    if ((header->magic == LOG_MAGIC_SENSOR) &&
-        ((header->payload_bytes == 0U) ||
-         ((header->payload_bytes % LOG_SENSOR_RECORD_BYTES) != 0U)))
+    switch (header->magic)
     {
-        return false;
-    }
+        case LOG_MAGIC_SENSOR:
+            return ((header->payload_bytes % LOG_SENSOR_RECORD_BYTES) == 0U);
 
-    if ((header->magic == LOG_MAGIC_AUDIO) &&
-        ((header->payload_bytes == 0U) ||
-         ((header->payload_bytes % sizeof(int16_t)) != 0U)))
-    {
-        return false;
-    }
+        case LOG_MAGIC_AUDIO:
+            return ((header->payload_bytes % sizeof(int16_t)) == 0U);
 
-    if ((header->magic == LOG_MAGIC_LIGHT_RAW) &&
-        ((header->payload_bytes == 0U) ||
-         (header->payload_bytes > LOG_LIGHT_RAW_MAX_PAYLOAD_BYTES) ||
-         ((header->payload_bytes % LOG_LIGHT_RAW_RECORD_BYTES) != 0U)))
-    {
-        return false;
-    }
+        case LOG_MAGIC_LIGHT_RAW:
+            return ((header->payload_bytes <= LOG_LIGHT_RAW_MAX_PAYLOAD_BYTES) &&
+                    ((header->payload_bytes % LOG_LIGHT_RAW_RECORD_BYTES) == 0U));
 
-    return true;
+        case LOG_MAGIC_AUDIO_FEATURE:
+        case LOG_MAGIC_LIGHT_FEATURE:
+            /* Complete records are recovered; a trailing remainder is tolerated. */
+            return true;
+
+        case LOG_MAGIC_LIGHT_RESULT:
+            return (header->payload_bytes >= LOG_LIGHT_RESULT_MIN_PAYLOAD_BYTES);
+
+        default:
+            /* Unknown magic with a plausible common header remains occupied. */
+            return true;
+    }
 }
 
-static LogStatus logger_recover_written_pages(NandLogger *logger,
-                                              uint32_t *written_pages)
+
+static uint32_t logger_physical_page_index(const read_address_t *addr)
+{
+    return ((uint32_t)addr->block * NAND_PAGES_PER_BLOCK) + addr->page;
+}
+
+
+LogStatus NANDLogger_Recover(NandLogger *logger)
 {
     read_address_t addr;
-    column_address_t column = 0U;
     LogPageHeader header;
+    uint32_t recovery_start_ms = HAL_GetTick();
     uint32_t logical_page = 0U;
     uint32_t max_pages;
+    uint32_t highest_page_sequence = 0U;
+    uint32_t highest_window_sequence = 0U;
+    uint32_t recovered_afea_records = 0U;
+    uint32_t recovered_lfea_records = 0U;
+    uint32_t physical_page;
+    uint32_t complete_records;
+    uint32_t complete_payload_bytes;
+    uint32_t record_size;
+    uint32_t window_sequence;
+    uint8_t page_sequence_seen = 0U;
+    uint8_t window_sequence_seen = 0U;
+    uint8_t is_feature_page;
+    uint8_t page_tail_erased;
     uint16_t good_block_index;
     uint8_t page_in_block;
     int nand_ret;
 
-    if ((logger == NULL) || (written_pages == NULL))
+    nand_recovery_started = 1U;
+    nand_recovery_completed = 0U;
+    nand_recovery_failed = 0U;
+    nand_recovery_duration_ms = 0U;
+    nand_recovery_pages_scanned = 0U;
+    nand_recovery_valid_pages = 0U;
+    nand_recovery_invalid_non_erased_pages = 0U;
+    nand_recovery_unknown_valid_pages = 0U;
+    nand_recovery_payload_remainder_pages = 0U;
+    nand_recovered_used_pages = 0U;
+    nand_recovered_next_physical_page = UINT32_MAX;
+    nand_recovered_highest_page_sequence = 0U;
+    nand_recovered_next_page_sequence = 0U;
+    nand_recovered_highest_window_sequence = 0U;
+    nand_recovered_next_window_sequence = 1U;
+    nand_recovery_read_failures = 0U;
+    nand_recovery_last_read_status = SPI_NAND_RET_OK;
+    nand_storage_full = 0U;
+    storage_full_latched = 0U;
+    nand_recovery_latest.first_free_physical_page = UINT32_MAX;
+    nand_recovery_latest.last_valid_physical_page = UINT32_MAX;
+    nand_recovery_latest.last_valid_magic = 0U;
+    nand_recovery_latest.last_valid_page_sequence = 0U;
+    nand_recovery_latest.last_afea_window_sequence = 0U;
+    nand_recovery_latest.last_lfea_window_sequence = 0U;
+
+    if (logger == NULL)
     {
+        nand_recovery_failed = 1U;
+        nand_recovery_duration_ms = HAL_GetTick() - recovery_start_ms;
         return LOG_ERR_BAD_ARGUMENT;
     }
 
-    *written_pages = 0U;
-
     if (logger->good_block_count == 0U)
     {
+        nand_recovery_failed = 1U;
+        nand_recovery_duration_ms = HAL_GetTick() - recovery_start_ms;
         return LOG_ERR_NO_GOOD_BLOCKS;
     }
 
@@ -1711,37 +1929,207 @@ static LogStatus logger_recover_written_pages(NandLogger *logger,
     {
         good_block_index = (uint16_t)(logical_page / NAND_PAGES_PER_BLOCK);
         page_in_block = (uint8_t)(logical_page % NAND_PAGES_PER_BLOCK);
-
         addr.block = logger->good_blocks[good_block_index];
         addr.page = page_in_block;
         addr.dummy = 0U;
+        physical_page = logger_physical_page_index(&addr);
 
         memset(&header, 0xFF, sizeof(header));
-
         nand_ret = spi_nand_page_read(addr,
-                                      column,
+                                      0U,
                                       (uint8_t *)&header,
                                       sizeof(header));
-
+        nand_recovery_pages_scanned++;
+        nand_recovery_last_read_status = nand_ret;
         if (nand_ret != SPI_NAND_RET_OK)
         {
-            return LOG_ERR_NAND;
+            nand_recovery_read_failures++;
+            goto recovery_failed;
         }
 
-        if (!logger_header_is_valid(&header))
+        if (logger_header_is_erased(&header))
         {
-            break;
+            nand_ret = spi_nand_page_read(addr,
+                                          LOG_HEADER_SIZE_BYTES,
+                                          logger_download_page_buffer,
+                                          LOG_SENSOR_PAYLOAD_BYTES);
+            nand_recovery_last_read_status = nand_ret;
+            if (nand_ret != SPI_NAND_RET_OK)
+            {
+                nand_recovery_read_failures++;
+                goto recovery_failed;
+            }
+
+            page_tail_erased = 1U;
+            for (uint32_t offset = 0U;
+                 offset < LOG_SENSOR_PAYLOAD_BYTES;
+                 offset++)
+            {
+                if (logger_download_page_buffer[offset] != 0xFFU)
+                {
+                    page_tail_erased = 0U;
+                    break;
+                }
+            }
+
+            if (page_tail_erased != 0U)
+            {
+                nand_recovered_next_physical_page = physical_page;
+                nand_recovery_latest.first_free_physical_page = physical_page;
+                break;
+            }
+
+            logical_page++;
+            nand_recovery_invalid_non_erased_pages++;
+            continue;
         }
 
+        /* Every non-erased page is consumed, even when its header is invalid. */
         logical_page++;
+
+        if ((!logger_header_structure_is_valid(&header)) ||
+            ((page_sequence_seen != 0U) &&
+             (header.page_sequence <= highest_page_sequence)))
+        {
+            nand_recovery_invalid_non_erased_pages++;
+            continue;
+        }
+
+        page_sequence_seen = 1U;
+        highest_page_sequence = header.page_sequence;
+        nand_recovery_valid_pages++;
+        nand_recovery_latest.last_valid_physical_page = physical_page;
+        nand_recovery_latest.last_valid_magic = header.magic;
+        nand_recovery_latest.last_valid_page_sequence = header.page_sequence;
+
+        if (!logger_magic_is_recognized(header.magic))
+        {
+            nand_recovery_unknown_valid_pages++;
+        }
+
+        is_feature_page = ((header.magic == LOG_MAGIC_AUDIO_FEATURE) ||
+                           (header.magic == LOG_MAGIC_LIGHT_FEATURE)) ? 1U : 0U;
+        if (is_feature_page == 0U)
+        {
+            continue;
+        }
+
+        record_size = (header.magic == LOG_MAGIC_AUDIO_FEATURE) ?
+                      LOG_AUDIO_FEATURE_RECORD_BYTES :
+                      LOG_LIGHT_FEATURE_RECORD_BYTES;
+        complete_records = header.payload_bytes / record_size;
+        complete_payload_bytes = complete_records * record_size;
+        if ((header.payload_bytes % record_size) != 0U)
+        {
+            nand_recovery_payload_remainder_pages++;
+        }
+
+        if (complete_payload_bytes != 0U)
+        {
+            nand_ret = spi_nand_page_read(addr,
+                                          LOG_HEADER_SIZE_BYTES,
+                                          logger_download_page_buffer,
+                                          complete_payload_bytes);
+            nand_recovery_last_read_status = nand_ret;
+            if (nand_ret != SPI_NAND_RET_OK)
+            {
+                nand_recovery_read_failures++;
+                goto recovery_failed;
+            }
+        }
+
+        for (uint32_t record_index = 0U;
+             record_index < complete_records;
+             record_index++)
+        {
+            window_sequence = logger_get_u32_le(
+                    &logger_download_page_buffer[record_index * record_size]);
+            if ((window_sequence_seen == 0U) ||
+                (window_sequence > highest_window_sequence))
+            {
+                highest_window_sequence = window_sequence;
+                window_sequence_seen = 1U;
+            }
+
+            if (header.magic == LOG_MAGIC_AUDIO_FEATURE)
+            {
+                recovered_afea_records++;
+                nand_recovery_latest.last_afea_window_sequence = window_sequence;
+            }
+            else
+            {
+                recovered_lfea_records++;
+                nand_recovery_latest.last_lfea_window_sequence = window_sequence;
+            }
+        }
     }
 
-    *written_pages = logical_page;
-    logger->page_sequence = logical_page;
-    logger->current_good_block_index = (uint16_t)(logical_page / NAND_PAGES_PER_BLOCK);
-    logger->current_page_in_block = (uint8_t)(logical_page % NAND_PAGES_PER_BLOCK);
+    logger->used_page_count = logical_page;
+    nand_recovered_used_pages = logical_page;
+    logger->current_good_block_index =
+            (uint16_t)(logical_page / NAND_PAGES_PER_BLOCK);
+    logger->current_page_in_block =
+            (uint8_t)(logical_page % NAND_PAGES_PER_BLOCK);
 
+    if (page_sequence_seen != 0U)
+    {
+        nand_recovered_highest_page_sequence = highest_page_sequence;
+        if (highest_page_sequence >= (UINT32_MAX - 1U))
+        {
+            logger->page_sequence = UINT32_MAX;
+            nand_recovered_next_page_sequence = UINT32_MAX;
+            logger_latch_storage_full();
+        }
+        else
+        {
+            logger->page_sequence = highest_page_sequence + 1U;
+            nand_recovered_next_page_sequence = logger->page_sequence;
+        }
+    }
+    else
+    {
+        logger->page_sequence = 0U;
+        nand_recovered_next_page_sequence = 0U;
+    }
+
+    if (window_sequence_seen != 0U)
+    {
+        nand_recovered_highest_window_sequence = highest_window_sequence;
+        if (highest_window_sequence >= (UINT32_MAX - 1U))
+        {
+            nand_recovered_next_window_sequence = UINT32_MAX;
+            logger_latch_storage_full();
+        }
+        else
+        {
+            nand_recovered_next_window_sequence = highest_window_sequence + 1U;
+        }
+    }
+
+    audio_feature_records_generated = recovered_afea_records;
+    audio_feature_records_buffered = recovered_afea_records;
+    audio_feature_records_persisted = recovered_afea_records;
+    audio_feature_records_pending = 0U;
+    light_feature_records_generated = recovered_lfea_records;
+    light_feature_records_buffered = recovered_lfea_records;
+    light_feature_records_persisted = recovered_lfea_records;
+    light_feature_records_pending = 0U;
+
+    if (logical_page >= max_pages)
+    {
+        nand_recovered_next_physical_page = UINT32_MAX;
+        nand_recovery_latest.first_free_physical_page = UINT32_MAX;
+        logger_latch_storage_full();
+    }
+
+    nand_recovery_completed = 1U;
+    nand_recovery_duration_ms = HAL_GetTick() - recovery_start_ms;
     return LOG_OK;
+
+recovery_failed:
+    nand_recovery_failed = 1U;
+    nand_recovery_duration_ms = HAL_GetTick() - recovery_start_ms;
+    return LOG_ERR_NAND;
 }
 
 LogStatus NANDLogger_DownloadAll(NandLogger *logger)
@@ -1768,31 +2156,24 @@ LogStatus NANDLogger_DownloadAll(NandLogger *logger)
         return LOG_ERR_BAD_ARGUMENT;
     }
 
-    /* Flush all partial SENS, LRAW, AFEA and LFEA pages before counting. */
-    status = NANDLogger_FlushAll(logger, HAL_GetTick());
-    if (status != LOG_OK)
+    if (nand_recovery_completed == 0U)
     {
-        return status;
-    }
-
-    /*
-     * Dopo il flush, page_sequence rappresenta il numero totale
-     * di pagine effettivamente scritte in NAND.
-     */
-    total_pages = logger->page_sequence;
-
-    /*
-     * page_sequence vive in RAM. Se la board e' ripartita tra acquisizione
-     * e download, ricostruisci il conteggio leggendo gli header in NAND.
-     */
-    if (total_pages == 0U)
-    {
-        status = logger_recover_written_pages(logger, &total_pages);
+        status = NANDLogger_Recover(logger);
         if (status != LOG_OK)
         {
             return status;
         }
     }
+
+    /* Flush all partial SENS, LRAW, AFEA and LFEA pages before counting. */
+    status = NANDLogger_FlushAll(logger, HAL_GetTick());
+    if ((status != LOG_OK) && (status != LOG_ERR_FULL))
+    {
+        return status;
+    }
+
+    /* Includes recovered pages, consumed interrupted pages and new writes. */
+    total_pages = logger->used_page_count;
 
     /*
      * Invio marker iniziale: 8 byte = "LOGSTART".

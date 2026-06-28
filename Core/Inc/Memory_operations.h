@@ -80,6 +80,13 @@ typedef enum
 #define NAND_PAGES_PER_BLOCK     64U
 #define NAND_PAGE_SIZE_BYTES     4096U
 
+_Static_assert(NAND_TOTAL_BLOCKS == SPI_NAND_BLOCKS_PER_PLANE,
+               "NAND block geometry mismatch");
+_Static_assert(NAND_PAGES_PER_BLOCK == SPI_NAND_PAGES_PER_BLOCK,
+               "NAND page-per-block geometry mismatch");
+_Static_assert(NAND_PAGE_SIZE_BYTES == SPI_NAND_PAGE_SIZE,
+               "NAND page-size geometry mismatch");
+
 #define LOG_HEADER_SIZE_BYTES    16U
 #define LOG_SENSOR_PAYLOAD_BYTES (NAND_PAGE_SIZE_BYTES - LOG_HEADER_SIZE_BYTES)
 #define LOG_SENSOR_RECORD_BYTES  40U
@@ -98,12 +105,14 @@ typedef enum
     (LOG_SENSOR_PAYLOAD_BYTES / LOG_LIGHT_FEATURE_RECORD_BYTES)
 #define LOG_LIGHT_FEATURE_MAX_PAYLOAD_BYTES \
     (LOG_LIGHT_FEATURE_RECORDS_PER_PAGE * LOG_LIGHT_FEATURE_RECORD_BYTES)
+#define LOG_LIGHT_RESULT_MIN_PAYLOAD_BYTES 40U
 
 #define LOG_MAGIC_SENSOR 0x534E4553UL  /* 'SENS' */
 #define LOG_MAGIC_AUDIO  0x30445541UL  /* 'AUD0' */
 #define LOG_MAGIC_LIGHT_RAW 0x5741524CUL  /* 'LRAW' */
 #define LOG_MAGIC_AUDIO_FEATURE 0x41454641UL  /* 'AFEA' */
 #define LOG_MAGIC_LIGHT_FEATURE 0x4145464CUL  /* 'LFEA' */
+#define LOG_MAGIC_LIGHT_RESULT 0x4554494CUL  /* 'LITE' */
 
 typedef struct __attribute__((packed))
 {
@@ -236,6 +245,7 @@ typedef struct
     uint8_t  current_page_in_block;
 
     uint32_t page_sequence;
+    uint32_t used_page_count;
 
     uint8_t sensor_page_buffer[NAND_PAGE_SIZE_BYTES];
     uint16_t sensor_records_in_page;
@@ -249,7 +259,7 @@ typedef struct
     uint16_t audio_feature_payload_bytes;
     uint32_t audio_feature_first_timestamp_ms;
 
-    /* Partial LFEA records are volatile until a full-page or final USB flush. */
+    /* Compact records remain here until their NAND page write succeeds. */
     uint8_t light_feature_page_buffer[NAND_PAGE_SIZE_BYTES];
     uint16_t light_feature_records_in_page;
     uint16_t light_feature_payload_bytes;
@@ -262,6 +272,16 @@ typedef struct
     uint32_t light_nand_verify_failures;
     uint32_t light_payload_consistency_failures;
 } NandLogger;
+
+typedef struct
+{
+    uint32_t first_free_physical_page;
+    uint32_t last_valid_physical_page;
+    uint32_t last_valid_magic;
+    uint32_t last_valid_page_sequence;
+    uint32_t last_afea_window_sequence;
+    uint32_t last_lfea_window_sequence;
+} NandRecoveryDiagnostics;
 
 extern volatile uint32_t nand_erase_attempts;
 extern volatile uint32_t nand_erase_failures;
@@ -286,13 +306,40 @@ extern volatile uint32_t audio_feature_records_buffered;
 extern volatile uint32_t audio_feature_records_persisted;
 extern volatile uint32_t audio_feature_page_flush_count;
 extern volatile uint32_t audio_feature_page_flush_errors;
+extern volatile uint32_t audio_feature_records_pending;
 extern volatile uint32_t light_feature_records_generated;
 extern volatile uint32_t light_feature_records_buffered;
 extern volatile uint32_t light_feature_records_persisted;
 extern volatile uint32_t light_feature_page_flush_count;
 extern volatile uint32_t light_feature_page_flush_errors;
+extern volatile uint32_t light_feature_records_pending;
+
+extern volatile uint8_t nand_recovery_started;
+extern volatile uint8_t nand_recovery_completed;
+extern volatile uint8_t nand_recovery_failed;
+extern volatile uint32_t nand_recovery_duration_ms;
+extern volatile uint32_t nand_recovery_pages_scanned;
+extern volatile uint32_t nand_recovery_valid_pages;
+extern volatile uint32_t nand_recovery_invalid_non_erased_pages;
+extern volatile uint32_t nand_recovery_unknown_valid_pages;
+extern volatile uint32_t nand_recovery_payload_remainder_pages;
+extern volatile uint32_t nand_recovered_used_pages;
+extern volatile uint32_t nand_recovered_next_physical_page;
+extern volatile uint32_t nand_recovered_highest_page_sequence;
+extern volatile uint32_t nand_recovered_next_page_sequence;
+extern volatile uint32_t nand_recovered_highest_window_sequence;
+extern volatile uint32_t nand_recovered_next_window_sequence;
+extern volatile uint8_t nand_storage_full;
+extern volatile uint8_t storage_full_latched;
+extern volatile uint32_t nand_write_failures;
+extern volatile uint32_t nand_recovery_read_failures;
+extern volatile int32_t nand_last_write_status;
+extern volatile int32_t nand_recovery_last_read_status;
+extern volatile NandRecoveryDiagnostics nand_recovery_latest;
 
 LogStatus NANDLogger_Init(NandLogger *logger);
+
+LogStatus NANDLogger_Recover(NandLogger *logger);
 
 LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger);
 

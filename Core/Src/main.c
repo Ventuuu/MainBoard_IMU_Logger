@@ -124,6 +124,12 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 #define LIGHT_FLAG_SMUX_ERROR (1U << 5)
 #define USER_BUTTON_DEBOUNCE_MS 250U
 #define NAND_STARTUP_SELF_TEST_ENABLE 0U
+#ifndef NAND_FORCE_ERASE_ON_BOOT
+#define NAND_FORCE_ERASE_ON_BOOT 0U
+#endif
+#ifndef NAND_FLUSH_COMPACT_RECORDS_EVERY_CYCLE
+#define NAND_FLUSH_COMPACT_RECORDS_EVERY_CYCLE 1U
+#endif
 
 typedef struct
 {
@@ -345,6 +351,8 @@ volatile uint32_t audio_scheduler_next_deadline_ms = 0U;
 volatile uint32_t audio_window_last_start_ms = 0U;
 volatile uint32_t audio_window_previous_start_ms = 0U;
 volatile uint32_t audio_window_start_interval_ms = 0U;
+static uint32_t current_window_sequence = 0U;
+static uint32_t next_window_sequence = 1U;
 
 static uint8_t audio_scheduler_enabled = 0U;
 static uint8_t audio_scheduler_last_busy_interval_valid = 0U;
@@ -541,6 +549,12 @@ static void AudioScheduler_Process(uint32_t now_ms)
     uint8_t can_start;
     uint8_t deadline_was_busy;
 
+    if (next_window_sequence == UINT32_MAX)
+    {
+        nand_storage_full = 1U;
+        storage_full_latched = 1U;
+    }
+
     if ((audio_scheduler_enabled == 0U) ||
         ((int32_t)(now_ms - audio_scheduler_next_deadline_ms) < 0))
     {
@@ -555,7 +569,8 @@ static void AudioScheduler_Process(uint32_t now_ms)
                  (usb_flag == 0U) &&
                  (start_acquisition_requested == 0U) &&
                  (stop_acquisition_requested == 0U) &&
-                 (microphone_active == 0U)) ? 1U : 0U;
+                 (microphone_active == 0U) &&
+                 (storage_full_latched == 0U)) ? 1U : 0U;
 
     deadline_was_busy = AudioScheduler_DeadlineWasBusy(
             audio_scheduler_next_deadline_ms);
@@ -963,7 +978,7 @@ static void Audio_PublishBasicFeatures(uint8_t window_complete,
         audio_basic_feature_processing_max_ms = processing_elapsed_ms;
     }
 
-    features.window_index = audio_windows_started;
+    features.window_index = current_window_sequence;
     features.window_start_ms = audio_window_last_start_ms;
     features.complete =
             ((window_complete != 0U) &&
@@ -1219,6 +1234,13 @@ static void UpdateStateLed(AppState state)
     uint32_t now = HAL_GetTick();
     uint32_t blink_interval_ms = 0U;
 
+    if (storage_full_latched != 0U)
+    {
+        LED_On(LED_GREEN);
+        LED_On(LED_RED);
+        return;
+    }
+
     if ((state_led_initialized == 0U) || (state != previous_state_led))
     {
         state_led_initialized = 1U;
@@ -1397,7 +1419,8 @@ static void StopAcquisition(void)
     if (light_measurement_pending != 0U)
     {
         light_measurement_pending = 0U;
-        if (AcquireAndStoreLightMeasurement() != LOG_OK)
+        if ((storage_full_latched == 0U) &&
+            (AcquireAndStoreLightMeasurement() != LOG_OK))
         {
             LED_On(LED_RED);
         }
@@ -1409,13 +1432,18 @@ static void StopAcquisition(void)
     stop_acquisition_requested = 0U;
 
     current_state = STATE_IDLE;
-    UpdateStateLed(current_state);
 
+#if (NAND_FLUSH_COMPACT_RECORDS_EVERY_CYCLE != 0U)
+    flush_status = NANDLogger_FlushAll(&nand_logger, stop_ms);
+#else
     flush_status = NANDLogger_FlushWindowData(&nand_logger, stop_ms);
+#endif
     if (flush_status != LOG_OK)
     {
         LED_On(LED_RED);
     }
+
+    UpdateStateLed(current_state);
 
     AudioScheduler_RecordWindowEnd(HAL_GetTick());
 }
@@ -1510,7 +1538,7 @@ static LogStatus AcquireAndStoreLightMeasurement(void)
 
     light_measurements_started++;
     light_samples_requested++;
-    feature_record.window_sequence = audio_windows_started;
+    feature_record.window_sequence = current_window_sequence;
     feature_record.exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
 
     if (light_exposure_state_valid != 0U)
@@ -1757,7 +1785,12 @@ MX_SPI3_Init();
     }
   }
 #else
-  (void)nand_init_result;
+  if (nand_init_result != SPI_NAND_RET_OK)
+  {
+    nand_recovery_started = 1U;
+    nand_recovery_failed = 1U;
+    Error_Handler();
+  }
 #endif
 
   LogStatus nand_logger_init_status = NANDLogger_Init(&nand_logger);
@@ -1834,10 +1867,19 @@ MX_SPI3_Init();
   }
 #endif
 
+#if (NAND_FORCE_ERASE_ON_BOOT != 0U)
   if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
   {
     Error_Handler();
   }
+#endif
+
+  if (NANDLogger_Recover(&nand_logger) != LOG_OK)
+  {
+    Error_Handler();
+  }
+
+  next_window_sequence = nand_recovered_next_window_sequence;
 
 
   if(IMU_Init() == 1) {
@@ -1868,7 +1910,10 @@ MX_SPI3_Init();
                                AS7341_PROCESSING_GAIN);
   }
 
-  LED_Off(LED_RED);
+  if (storage_full_latched == 0U)
+  {
+    LED_Off(LED_RED);
+  }
   AudioScheduler_Init();
 
   /* USER CODE END 2 */
@@ -1895,6 +1940,15 @@ MX_SPI3_Init();
           HAL_StatusTypeDef start_status;
 
           start_acquisition_requested = 0U;
+
+          if ((storage_full_latched != 0U) ||
+              (next_window_sequence == UINT32_MAX))
+          {
+            nand_storage_full = 1U;
+            storage_full_latched = 1U;
+            UpdateStateLed(current_state);
+            break;
+          }
 
           memset((void *)&mic_diag, 0, sizeof(mic_diag));
           mic_diag.audio_window_target_samples = AUDIO_WINDOW_TARGET_SAMPLES;
@@ -1945,6 +1999,8 @@ MX_SPI3_Init();
             mic_diag.dma_start_ok_count++;
             mic_diag.dma_session_start_ok_count++;
             microphone_active = 1U;
+            current_window_sequence = next_window_sequence;
+            next_window_sequence++;
             AudioScheduler_RecordWindowStart(mic_diag.last_dma_start_tick_ms);
             light_measurement_pending = 1U;
             light_measurements_requested++;
