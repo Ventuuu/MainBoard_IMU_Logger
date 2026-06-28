@@ -104,7 +104,24 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 #define AUDIO_FLAG_HIGH_LEVEL (1U << 4)
 #define AUDIO_FLAG_SILENT_OR_UNAVAILABLE (1U << 5)
 #define AUDIO_FLAG_IMPULSIVE_EVENT (1U << 6)
-#define LIGHT_SUBSAMPLE_TICKS 8U
+#ifndef LIGHT_STORE_RAW_LRAW
+#define LIGHT_STORE_RAW_LRAW 0U
+#endif
+#ifndef LIGHT_STORE_FEATURE_RECORD
+#define LIGHT_STORE_FEATURE_RECORD 1U
+#endif
+#define LIGHT_EXPOSURE_UNAVAILABLE 255U
+#define LIGHT_THRESHOLD_DARK_TO_LOW_COUNTS 3U
+#define LIGHT_THRESHOLD_LOW_TO_MODERATE_COUNTS 50U
+#define LIGHT_THRESHOLD_MODERATE_TO_HIGH_COUNTS 6500U
+#define LIGHT_THRESHOLD_HIGH_TO_VERY_HIGH_COUNTS 9800U
+#define LIGHT_SATURATION_CLEAR_COUNTS 10000U
+#define LIGHT_FLAG_COMPLETE (1U << 0)
+#define LIGHT_FLAG_ACQUISITION_VALID (1U << 1)
+#define LIGHT_FLAG_CLASSIFICATION_VALID (1U << 2)
+#define LIGHT_FLAG_SATURATED (1U << 3)
+#define LIGHT_FLAG_I2C_ERROR (1U << 4)
+#define LIGHT_FLAG_SMUX_ERROR (1U << 5)
 #define USER_BUTTON_DEBOUNCE_MS 250U
 #define NAND_STARTUP_SELF_TEST_ENABLE 0U
 
@@ -124,6 +141,38 @@ typedef enum
     AUDIO_ENV_HIGH_EXPOSURE = 6,
     AUDIO_ENV_UNAVAILABLE = 255
 } AudioEnvironmentClass;
+
+typedef enum
+{
+    LIGHT_DARK = 0,
+    LIGHT_LOW_EXPOSURE = 1,
+    LIGHT_MODERATE_EXPOSURE = 2,
+    LIGHT_HIGH_EXPOSURE = 3,
+    LIGHT_VERY_HIGH_EXPOSURE = 4
+} LightExposureClass;
+
+typedef struct
+{
+    uint32_t window_sequence;
+    uint32_t sample_timestamp_ms;
+    uint16_t f1;
+    uint16_t f2;
+    uint16_t f3;
+    uint16_t f4;
+    uint16_t f5;
+    uint16_t f6;
+    uint16_t f7;
+    uint16_t f8;
+    uint16_t clear;
+    uint16_t nir;
+    uint8_t previous_exposure_class;
+    uint8_t exposure_class;
+    uint8_t flags;
+    uint8_t complete;
+    uint8_t acquisition_valid;
+    uint8_t classification_valid;
+    uint8_t saturated;
+} LightFeatureDiagnostics;
 
 typedef struct
 {
@@ -338,14 +387,25 @@ uint8_t raw_light[22] = {0};
 
 static AS7341_Spectrum light_spectrum;
 static uint8_t as7341_available = 0U;
-static uint8_t light_subsample_tick = 0U;
+static uint8_t light_measurement_pending = 0U;
+static uint8_t light_exposure_state_valid = 0U;
+static LightExposureClass light_exposure_state = LIGHT_DARK;
 static uint32_t light_session_start_ms = 0U;
+#if (LIGHT_STORE_RAW_LRAW != 0U)
 static uint32_t light_sample_index = 0U;
+#endif
 
 volatile uint32_t light_samples_requested = 0U;
 volatile uint32_t light_samples_acquired = 0U;
 volatile uint32_t light_samples_saved = 0U;
 volatile uint32_t light_samples_discarded = 0U;
+volatile uint32_t light_measurements_requested = 0U;
+volatile uint32_t light_measurements_started = 0U;
+volatile uint32_t light_measurements_completed = 0U;
+volatile uint32_t light_measurements_failed = 0U;
+volatile uint32_t light_measurement_processing_last_ms = 0U;
+volatile uint32_t light_measurement_processing_max_ms = 0U;
+volatile LightFeatureDiagnostics light_feature_latest;
 
 /// ----- NAND FLASH variables ----- ///
 
@@ -376,7 +436,9 @@ static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
 /* USER CODE BEGIN PFP */
 static void UpdateStateLed(AppState state);
-static LogStatus AcquireAndStoreLightRawSample(void);
+static LightExposureClass Light_ClassifyInitial(uint16_t clear_raw);
+static LightExposureClass Light_ClassifyWithHysteresis(uint16_t clear_raw);
+static LogStatus AcquireAndStoreLightMeasurement(void);
 static void AudioRing_Reset(void);
 static uint32_t AudioRing_Count(void);
 static void AudioRing_EnqueueFromIsr(const int16_t *samples);
@@ -457,6 +519,19 @@ static void AudioScheduler_Init(void)
     audio_scheduler_last_busy_end_ms = 0U;
     audio_scheduler_last_busy_interval_valid = 0U;
     audio_scheduler_enabled = 1U;
+
+    light_measurement_pending = 0U;
+    light_exposure_state_valid = 0U;
+    light_exposure_state = LIGHT_DARK;
+    light_measurements_requested = 0U;
+    light_measurements_started = 0U;
+    light_measurements_completed = 0U;
+    light_measurements_failed = 0U;
+    light_measurement_processing_last_ms = 0U;
+    light_measurement_processing_max_ms = 0U;
+    memset((void *)&light_feature_latest, 0, sizeof(light_feature_latest));
+    light_feature_latest.previous_exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
+    light_feature_latest.exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
 }
 
 static void AudioScheduler_Process(uint32_t now_ms)
@@ -1319,6 +1394,15 @@ static void StopAcquisition(void)
         window_complete = 0U;
     }
 
+    if (light_measurement_pending != 0U)
+    {
+        light_measurement_pending = 0U;
+        if (AcquireAndStoreLightMeasurement() != LOG_OK)
+        {
+            LED_On(LED_RED);
+        }
+    }
+
     Audio_PublishBasicFeatures(window_complete, drain_status);
 
     sensor_tick_pending = 0U;
@@ -1336,54 +1420,250 @@ static void StopAcquisition(void)
     AudioScheduler_RecordWindowEnd(HAL_GetTick());
 }
 
-static LogStatus AcquireAndStoreLightRawSample(void)
+static LightExposureClass Light_ClassifyInitial(uint16_t clear_raw)
 {
-    LightRawSampleRecord record;
-    LogStatus status;
-    uint32_t now_ms;
+    if (clear_raw < LIGHT_THRESHOLD_DARK_TO_LOW_COUNTS)
+        return LIGHT_DARK;
+    if (clear_raw < LIGHT_THRESHOLD_LOW_TO_MODERATE_COUNTS)
+        return LIGHT_LOW_EXPOSURE;
+    if (clear_raw < LIGHT_THRESHOLD_MODERATE_TO_HIGH_COUNTS)
+        return LIGHT_MODERATE_EXPOSURE;
+    if (clear_raw < LIGHT_THRESHOLD_HIGH_TO_VERY_HIGH_COUNTS)
+        return LIGHT_HIGH_EXPOSURE;
 
-    light_samples_requested++;
+    return LIGHT_VERY_HIGH_EXPOSURE;
+}
 
-    if (as7341_available == 0U)
+static uint16_t Light_GetBoundaryThreshold(LightExposureClass lower_class)
+{
+    switch (lower_class)
     {
-        light_samples_discarded++;
-        return LOG_OK;
+        case LIGHT_DARK:
+            return LIGHT_THRESHOLD_DARK_TO_LOW_COUNTS;
+        case LIGHT_LOW_EXPOSURE:
+            return LIGHT_THRESHOLD_LOW_TO_MODERATE_COUNTS;
+        case LIGHT_MODERATE_EXPOSURE:
+            return LIGHT_THRESHOLD_MODERATE_TO_HIGH_COUNTS;
+        case LIGHT_HIGH_EXPOSURE:
+        default:
+            return LIGHT_THRESHOLD_HIGH_TO_VERY_HIGH_COUNTS;
+    }
+}
+
+static uint16_t Light_GetReturnThreshold(uint16_t threshold)
+{
+    uint16_t margin = (uint16_t)(((uint32_t)threshold * 5U + 99U) / 100U);
+
+    if (margin < 1U)
+    {
+        margin = 1U;
     }
 
-    if (AS7341_ReadFullSpectrum(&light_spectrum) != 1U)
+    return (uint16_t)(threshold - margin);
+}
+
+static LightExposureClass Light_ClassifyWithHysteresis(uint16_t clear_raw)
+{
+    LightExposureClass classification = light_exposure_state;
+
+    while (classification < LIGHT_VERY_HIGH_EXPOSURE)
     {
+        uint16_t threshold = Light_GetBoundaryThreshold(classification);
+
+        if (clear_raw < threshold)
+        {
+            break;
+        }
+
+        classification = (LightExposureClass)((uint32_t)classification + 1U);
+    }
+
+    while (classification > LIGHT_DARK)
+    {
+        LightExposureClass lower_class =
+                (LightExposureClass)((uint32_t)classification - 1U);
+        uint16_t threshold = Light_GetBoundaryThreshold(lower_class);
+
+        if (clear_raw >= Light_GetReturnThreshold(threshold))
+        {
+            break;
+        }
+
+        classification = lower_class;
+    }
+
+    return classification;
+}
+
+static LogStatus AcquireAndStoreLightMeasurement(void)
+{
+    LightFeatureRecordV1 feature_record = {0};
+    LightFeatureDiagnostics latest = {0};
+    LogStatus storage_status = LOG_OK;
+    uint32_t processing_start_ms = HAL_GetTick();
+    uint8_t measurement_valid = 0U;
+    uint8_t previous_exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+    uint32_t i2c_errors_before = as7341_diag_i2c_error_count;
+    uint32_t smux_errors_before = as7341_diag_smux_timeout_count;
+#endif
+
+    light_measurements_started++;
+    light_samples_requested++;
+    feature_record.window_sequence = audio_windows_started;
+    feature_record.exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
+
+    if (light_exposure_state_valid != 0U)
+    {
+        previous_exposure_class = (uint8_t)light_exposure_state;
+    }
+
+    memset(&light_spectrum, 0, sizeof(light_spectrum));
+    if ((as7341_available != 0U) &&
+        (AS7341_ReadFullSpectrum(&light_spectrum) == 1U))
+    {
+        LightExposureClass classification;
+
+        feature_record.f1 = light_spectrum.ch[0];
+        feature_record.f2 = light_spectrum.ch[1];
+        feature_record.f3 = light_spectrum.ch[2];
+        feature_record.f4 = light_spectrum.ch[3];
+        feature_record.f5 = light_spectrum.ch[4];
+        feature_record.f6 = light_spectrum.ch[5];
+        feature_record.f7 = light_spectrum.ch[6];
+        feature_record.f8 = light_spectrum.ch[7];
+        feature_record.clear = light_spectrum.ch[8];
+        feature_record.nir = light_spectrum.ch[9];
+        feature_record.sample_timestamp_ms = HAL_GetTick();
+
+        if (light_exposure_state_valid == 0U)
+        {
+            classification = Light_ClassifyInitial(feature_record.clear);
+        }
+        else
+        {
+            classification =
+                    Light_ClassifyWithHysteresis(feature_record.clear);
+        }
+
+        if (feature_record.clear >= LIGHT_SATURATION_CLEAR_COUNTS)
+        {
+            classification = LIGHT_VERY_HIGH_EXPOSURE;
+            feature_record.flags |= LIGHT_FLAG_SATURATED;
+        }
+
+        light_exposure_state = classification;
+        light_exposure_state_valid = 1U;
+        feature_record.exposure_class = (uint8_t)classification;
+        feature_record.flags |= LIGHT_FLAG_COMPLETE |
+                                LIGHT_FLAG_ACQUISITION_VALID |
+                                LIGHT_FLAG_CLASSIFICATION_VALID;
+        measurement_valid = 1U;
+        light_measurements_completed++;
+        light_samples_acquired++;
+
+#if (LIGHT_STORE_RAW_LRAW != 0U)
+        {
+            LightRawSampleRecord raw_record;
+            LogStatus raw_status;
+
+            raw_record.sample_elapsed_ms =
+                    feature_record.sample_timestamp_ms - light_session_start_ms;
+            raw_record.sample_index = light_sample_index;
+            raw_record.f1_counts = feature_record.f1;
+            raw_record.f2_counts = feature_record.f2;
+            raw_record.f3_counts = feature_record.f3;
+            raw_record.f4_counts = feature_record.f4;
+            raw_record.f5_counts = feature_record.f5;
+            raw_record.f6_counts = feature_record.f6;
+            raw_record.f7_counts = feature_record.f7;
+            raw_record.f8_counts = feature_record.f8;
+            raw_record.clear_counts = feature_record.clear;
+            raw_record.nir_counts = feature_record.nir;
+
+            raw_status = NANDLogger_AppendLightRawRecord(
+                    &nand_logger,
+                    &raw_record,
+                    feature_record.sample_timestamp_ms);
+            if (raw_status == LOG_OK)
+            {
+                light_sample_index++;
+                light_samples_saved++;
+            }
+            else
+            {
+                light_samples_discarded++;
+                storage_status = raw_status;
+            }
+        }
+#endif
+    }
+    else
+    {
+        feature_record.sample_timestamp_ms = HAL_GetTick();
+        light_measurements_failed++;
         light_samples_discarded++;
         LED_On(LED_RED);
-        return LOG_OK;
+
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+        if (as7341_diag_i2c_error_count != i2c_errors_before)
+        {
+            feature_record.flags |= LIGHT_FLAG_I2C_ERROR;
+        }
+        if (as7341_diag_smux_timeout_count != smux_errors_before)
+        {
+            feature_record.flags |= LIGHT_FLAG_SMUX_ERROR;
+        }
+#endif
     }
 
-    light_samples_acquired++;
-
-    now_ms = HAL_GetTick();
-    record.sample_elapsed_ms = now_ms - light_session_start_ms;
-    record.sample_index = light_sample_index;
-    record.f1_counts = light_spectrum.ch[0];
-    record.f2_counts = light_spectrum.ch[1];
-    record.f3_counts = light_spectrum.ch[2];
-    record.f4_counts = light_spectrum.ch[3];
-    record.f5_counts = light_spectrum.ch[4];
-    record.f6_counts = light_spectrum.ch[5];
-    record.f7_counts = light_spectrum.ch[6];
-    record.f8_counts = light_spectrum.ch[7];
-    record.clear_counts = light_spectrum.ch[8];
-    record.nir_counts = light_spectrum.ch[9];
-
-    status = NANDLogger_AppendLightRawRecord(&nand_logger, &record, now_ms);
-    if (status != LOG_OK)
+#if (LIGHT_STORE_FEATURE_RECORD != 0U)
+    light_feature_records_generated++;
     {
-        light_samples_discarded++;
-        return status;
+        LogStatus feature_status = NANDLogger_AppendLightFeatureRecord(
+                &nand_logger,
+                &feature_record);
+
+        if (feature_status != LOG_OK)
+        {
+            storage_status = feature_status;
+        }
+    }
+#endif
+
+    latest.window_sequence = feature_record.window_sequence;
+    latest.sample_timestamp_ms = feature_record.sample_timestamp_ms;
+    latest.f1 = feature_record.f1;
+    latest.f2 = feature_record.f2;
+    latest.f3 = feature_record.f3;
+    latest.f4 = feature_record.f4;
+    latest.f5 = feature_record.f5;
+    latest.f6 = feature_record.f6;
+    latest.f7 = feature_record.f7;
+    latest.f8 = feature_record.f8;
+    latest.clear = feature_record.clear;
+    latest.nir = feature_record.nir;
+    latest.previous_exposure_class = previous_exposure_class;
+    latest.exposure_class = feature_record.exposure_class;
+    latest.flags = feature_record.flags;
+    latest.complete = ((feature_record.flags & LIGHT_FLAG_COMPLETE) != 0U) ? 1U : 0U;
+    latest.acquisition_valid = measurement_valid;
+    latest.classification_valid =
+            ((feature_record.flags & LIGHT_FLAG_CLASSIFICATION_VALID) != 0U) ?
+            1U : 0U;
+    latest.saturated =
+            ((feature_record.flags & LIGHT_FLAG_SATURATED) != 0U) ? 1U : 0U;
+    light_feature_latest = latest;
+
+    light_measurement_processing_last_ms = HAL_GetTick() - processing_start_ms;
+    if (light_measurement_processing_last_ms >
+        light_measurement_processing_max_ms)
+    {
+        light_measurement_processing_max_ms =
+                light_measurement_processing_last_ms;
     }
 
-    light_sample_index++;
-    light_samples_saved++;
-
-    return LOG_OK;
+    return storage_status;
 }
 
 static void ProcessSensorTick(void)
@@ -1393,19 +1673,6 @@ static void ProcessSensorTick(void)
     /* --- Read IMU --- */
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
     IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
-
-    light_subsample_tick++;
-    if (light_subsample_tick >= LIGHT_SUBSAMPLE_TICKS)
-    {
-        light_subsample_tick = 0U;
-
-        if (AcquireAndStoreLightRawSample() != LOG_OK)
-        {
-            StopAcquisition();
-            LED_On(LED_RED);
-            return;
-        }
-    }
 
     /* --- BLE transmission --- */
     BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
@@ -1641,9 +1908,11 @@ MX_SPI3_Init();
           tim = 0U;
           sensor_tick_pending = 0U;
           memset(raw_light, 0, sizeof(raw_light));
-          light_subsample_tick = 0U;
+          light_measurement_pending = 0U;
           light_session_start_ms = HAL_GetTick();
+#if (LIGHT_STORE_RAW_LRAW != 0U)
           light_sample_index = 0U;
+#endif
           light_samples_requested = 0U;
           light_samples_acquired = 0U;
           light_samples_saved = 0U;
@@ -1677,6 +1946,8 @@ MX_SPI3_Init();
             mic_diag.dma_session_start_ok_count++;
             microphone_active = 1U;
             AudioScheduler_RecordWindowStart(mic_diag.last_dma_start_tick_ms);
+            light_measurement_pending = 1U;
+            light_measurements_requested++;
             HAL_TIM_Base_Start_IT(&htim2);
           }
           else
