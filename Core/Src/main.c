@@ -39,6 +39,8 @@
 #include "imu_driver.h"
 #include "bluetooth.h"
 #include "as7341_driver.h"
+#include "StepCounter.h"
+
 
 /* USER CODE END Includes */
 
@@ -205,6 +207,10 @@ int main(void)
     LED_Toggle(LED_RED); HAL_Delay(500);
     LED_Toggle(LED_RED); HAL_Delay(500);
   }
+
+  //step counter initialization
+  StepCounter_initialize();
+
 
   /* Initialize the AS7341 light sensor on the same I2C bus (hi2c3). */
   if (AS7341_Init() != 1) {
@@ -807,6 +813,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     /* --- Read IMU (always) --- */
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
     IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
+
+    /* --- Read steps   ---*/
+      StepCounter_step();
 
     /* --- Read light sensor (every LIGHT_SUBSAMPLE ticks = 10 Hz) --- */
     light_tick++;
