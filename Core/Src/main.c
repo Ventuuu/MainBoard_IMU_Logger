@@ -90,7 +90,7 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 /* Approximate 1 kHz host calibration offset; this is not a certified SPL meter. */
 #define AUDIO_SPL_CALIBRATION_OFFSET_DB 122.40
 #ifndef AUDIO_STORE_RAW_PCM
-#define AUDIO_STORE_RAW_PCM 1U
+#define AUDIO_STORE_RAW_PCM 0U
 #endif
 #ifndef AUDIO_STORE_FEATURE_RECORD
 #define AUDIO_STORE_FEATURE_RECORD 1U
