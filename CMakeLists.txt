@@ -48,6 +48,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/as7341_driver.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/light_metrics_mcu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/bluetooth.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ble_sync.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ble_sync_protocol.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/imu_driver.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/led_driver.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Memory_operations.c

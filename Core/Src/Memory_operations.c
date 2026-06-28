@@ -215,6 +215,7 @@ volatile uint16_t nand_first_failed_erase_block = UINT16_MAX;
 volatile int32_t nand_last_erase_status = SPI_NAND_RET_OK;
 
 static void logger_note_light_payload_consistency_failure(NandLogger *logger);
+static uint32_t logger_physical_page_index(const read_address_t *addr);
 
 
 /* -------------------------------------------------------------------------- */
@@ -1152,11 +1153,21 @@ LogStatus NANDLogger_Init(NandLogger *logger)
         }
     }
 
-    if (logger->good_block_count == 0U)
+    if (logger->good_block_count < 3U)
     {
         nand_recovery_failed = 1U;
         return LOG_ERR_NO_GOOD_BLOCKS;
     }
+
+    /*
+     * Reserve the last two good physical blocks for the BLE ACK journal. The
+     * choice is deterministic across resets and tolerates factory bad blocks.
+     */
+    logger->sync_metadata_block_a =
+            logger->good_blocks[logger->good_block_count - 2U];
+    logger->sync_metadata_block_b =
+            logger->good_blocks[logger->good_block_count - 1U];
+    logger->good_block_count -= 2U;
 
     logger->current_good_block_index = 0U;
     logger->current_page_in_block = 0U;
@@ -1850,6 +1861,89 @@ static bool logger_header_structure_is_valid(const LogPageHeader *header)
             /* Unknown magic with a plausible common header remains occupied. */
             return true;
     }
+}
+
+
+uint32_t NANDLogger_DataCapacityPages(const NandLogger *logger)
+{
+    if (logger == NULL)
+    {
+        return 0U;
+    }
+
+    return (uint32_t)logger->good_block_count * NAND_PAGES_PER_BLOCK;
+}
+
+
+LogStatus NANDLogger_ReadPageInfo(const NandLogger *logger,
+                                  uint32_t logical_page,
+                                  NandLoggerPageInfo *info)
+{
+    read_address_t addr;
+    int nand_ret;
+
+    if ((logger == NULL) || (info == NULL))
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    if (logger_logical_page_to_address(logger, logical_page, &addr) != LOG_OK)
+    {
+        return LOG_ERR_FULL;
+    }
+
+    memset(info, 0, sizeof(*info));
+    memset(&info->header, 0xFF, sizeof(info->header));
+    nand_ret = spi_nand_page_read(addr,
+                                  0U,
+                                  (uint8_t *)&info->header,
+                                  sizeof(info->header));
+    if (nand_ret != SPI_NAND_RET_OK)
+    {
+        return LOG_ERR_NAND;
+    }
+
+    info->logical_page_index = logical_page;
+    info->physical_page_index = logger_physical_page_index(&addr);
+    info->header_erased = logger_header_is_erased(&info->header) ? 1U : 0U;
+    info->structurally_valid =
+            logger_header_structure_is_valid(&info->header) ? 1U : 0U;
+    return LOG_OK;
+}
+
+
+LogStatus NANDLogger_ReadPageBytes(const NandLogger *logger,
+                                   uint32_t logical_page,
+                                   uint32_t offset,
+                                   uint8_t *destination,
+                                   uint32_t length)
+{
+    read_address_t addr;
+    int nand_ret;
+
+    if ((logger == NULL) ||
+        ((destination == NULL) && (length != 0U)) ||
+        (offset > NAND_PAGE_SIZE_BYTES) ||
+        (length > (NAND_PAGE_SIZE_BYTES - offset)))
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    if (length == 0U)
+    {
+        return LOG_OK;
+    }
+
+    if (logger_logical_page_to_address(logger, logical_page, &addr) != LOG_OK)
+    {
+        return LOG_ERR_FULL;
+    }
+
+    nand_ret = spi_nand_page_read(addr,
+                                  (column_address_t)offset,
+                                  destination,
+                                  length);
+    return (nand_ret == SPI_NAND_RET_OK) ? LOG_OK : LOG_ERR_NAND;
 }
 
 

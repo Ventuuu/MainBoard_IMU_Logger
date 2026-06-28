@@ -241,6 +241,10 @@ typedef struct
     uint16_t good_blocks[NAND_TOTAL_BLOCKS];
     uint16_t good_block_count;
 
+    /* Last two good physical blocks, excluded from the data log. */
+    uint16_t sync_metadata_block_a;
+    uint16_t sync_metadata_block_b;
+
     uint16_t current_good_block_index;
     uint8_t  current_page_in_block;
 
@@ -272,6 +276,15 @@ typedef struct
     uint32_t light_nand_verify_failures;
     uint32_t light_payload_consistency_failures;
 } NandLogger;
+
+typedef struct
+{
+    LogPageHeader header;
+    uint32_t logical_page_index;
+    uint32_t physical_page_index;
+    uint8_t header_erased;
+    uint8_t structurally_valid;
+} NandLoggerPageInfo;
 
 typedef struct
 {
@@ -371,6 +384,16 @@ LogStatus NANDLogger_FlushAudioFeatures(NandLogger *logger);
 LogStatus NANDLogger_FlushLightFeatures(NandLogger *logger);
 LogStatus NANDLogger_FlushWindowData(NandLogger *logger, uint32_t timestamp_ms);
 LogStatus NANDLogger_FlushAll(NandLogger *logger, uint32_t timestamp_ms);
+
+uint32_t NANDLogger_DataCapacityPages(const NandLogger *logger);
+LogStatus NANDLogger_ReadPageInfo(const NandLogger *logger,
+                                  uint32_t logical_page,
+                                  NandLoggerPageInfo *info);
+LogStatus NANDLogger_ReadPageBytes(const NandLogger *logger,
+                                   uint32_t logical_page,
+                                   uint32_t offset,
+                                   uint8_t *destination,
+                                   uint32_t length);
 
 void NANDLogger_SerializeLightRawRecordForTest(uint8_t *dst,
                                                const LightRawSampleRecord *record);

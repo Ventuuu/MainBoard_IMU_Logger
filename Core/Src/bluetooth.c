@@ -205,6 +205,34 @@ void BLE_SendData(uint8_t* data, uint8_t data_length) {
     HAL_UART_Transmit(&huart3, data, data_length, UART_TIMEOUT);
 }
 
+int BLE_TransmitTransparent(const uint8_t *data,
+                            uint16_t data_length,
+                            uint32_t timeout_ms) {
+    if ((data == NULL) && (data_length != 0U)) {
+        return -1;
+    }
+
+    return (HAL_UART_Transmit(&huart3,
+                              (uint8_t *)data,
+                              data_length,
+                              timeout_ms) == HAL_OK) ? 0 : -1;
+}
+
+int BLE_StartReceiveByteIT(uint8_t *byte) {
+    if (byte == NULL) {
+        return -1;
+    }
+
+    return (HAL_UART_Receive_IT(&huart3, byte, 1U) == HAL_OK) ? 0 : -1;
+}
+
+void BLE_FlushTransparentReceive(void) {
+    __HAL_UART_CLEAR_OREFLAG(&huart3);
+    __HAL_UART_CLEAR_FEFLAG(&huart3);
+    __HAL_UART_CLEAR_NEFLAG(&huart3);
+    __HAL_UART_SEND_REQ(&huart3, UART_RXDATA_FLUSH_REQUEST);
+}
+
 /**
  * @brief Receives data from a connected external BLE device.
  *

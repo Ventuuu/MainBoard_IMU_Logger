@@ -39,6 +39,7 @@
 #include "led_driver.h"
 #include "imu_driver.h"
 #include "bluetooth.h"
+#include "ble_sync.h"
 #include "as7341_driver.h"
 #include "as7341_processing_config.h"
 
@@ -358,12 +359,17 @@ static uint8_t audio_scheduler_enabled = 0U;
 static uint8_t audio_scheduler_last_busy_interval_valid = 0U;
 static uint32_t audio_scheduler_last_busy_start_ms = 0U;
 static uint32_t audio_scheduler_last_busy_end_ms = 0U;
+volatile uint8_t acquisition_paused_for_ble_sync = 0U;
+volatile uint32_t acquisition_cycles_skipped_for_ble_sync = 0U;
 
 // --- State Machine ---
 static volatile AppState current_state = STATE_IDLE;
 static uint32_t state_led_last_toggle_ms = 0U;
 static AppState previous_state_led = STATE_IDLE;
 static uint8_t state_led_initialized = 0U;
+static uint32_t ble_sync_abort_led_until_ms = 0U;
+static uint32_t ble_sync_abort_led_last_toggle_ms = 0U;
+static uint32_t ble_sync_observed_aborted_sessions = 0U;
 
 // --- Global Flags ---
 volatile uint8_t usb_flag = 0U;
@@ -473,6 +479,9 @@ static void AudioScheduler_Init(void);
 static void AudioScheduler_Process(uint32_t now_ms);
 static void AudioScheduler_RecordWindowStart(uint32_t start_ms);
 static void AudioScheduler_RecordWindowEnd(uint32_t end_ms);
+static void AudioScheduler_PauseForBleSync(void);
+static void AudioScheduler_ResumeAfterBleSync(uint32_t now_ms);
+static void ProcessBleSync(uint32_t now_ms);
 
 /* USER CODE END PFP */
 
@@ -556,6 +565,8 @@ static void AudioScheduler_Process(uint32_t now_ms)
     }
 
     if ((audio_scheduler_enabled == 0U) ||
+        (acquisition_paused_for_ble_sync != 0U) ||
+        (ble_sync_requested != 0U) ||
         ((int32_t)(now_ms - audio_scheduler_next_deadline_ms) < 0))
     {
         return;
@@ -608,6 +619,28 @@ static void AudioScheduler_RecordWindowEnd(uint32_t end_ms)
 {
     audio_scheduler_last_busy_end_ms = end_ms;
     audio_scheduler_last_busy_interval_valid = 1U;
+}
+
+static void AudioScheduler_PauseForBleSync(void)
+{
+    acquisition_paused_for_ble_sync = 1U;
+    start_acquisition_requested = 0U;
+}
+
+static void AudioScheduler_ResumeAfterBleSync(uint32_t now_ms)
+{
+    if ((audio_scheduler_enabled != 0U) &&
+        ((int32_t)(now_ms - audio_scheduler_next_deadline_ms) >= 0))
+    {
+        uint32_t elapsed_ms = now_ms - audio_scheduler_next_deadline_ms;
+        acquisition_cycles_skipped_for_ble_sync +=
+                (elapsed_ms / AUDIO_WINDOW_PERIOD_MS) + 1U;
+    }
+
+    audio_scheduler_next_deadline_ms = now_ms + AUDIO_WINDOW_PERIOD_MS;
+    audio_scheduler_last_busy_interval_valid = 0U;
+    acquisition_paused_for_ble_sync = 0U;
+    start_acquisition_requested = 0U;
 }
 
 static uint32_t AudioRing_CountFrom(uint32_t head, uint32_t tail)
@@ -1241,6 +1274,24 @@ static void UpdateStateLed(AppState state)
         return;
     }
 
+    if ((ble_sync_abort_led_until_ms != 0U) &&
+        ((int32_t)(now - ble_sync_abort_led_until_ms) < 0))
+    {
+        LED_Off(LED_GREEN);
+        if ((now - ble_sync_abort_led_last_toggle_ms) >= 150U)
+        {
+            ble_sync_abort_led_last_toggle_ms = now;
+            LED_Toggle(LED_RED);
+        }
+        return;
+    }
+    else if (ble_sync_abort_led_until_ms != 0U)
+    {
+        ble_sync_abort_led_until_ms = 0U;
+        LED_Off(LED_RED);
+        state_led_initialized = 0U;
+    }
+
     if ((state_led_initialized == 0U) || (state != previous_state_led))
     {
         state_led_initialized = 1U;
@@ -1259,6 +1310,11 @@ static void UpdateStateLed(AppState state)
 
             case STATE_USB_CONNECTED:
             case STATE_DOWNLOAD:
+                LED_On(LED_GREEN);
+                return;
+
+            case STATE_BLE_SYNC:
+                LED_Off(LED_RED);
                 LED_On(LED_GREEN);
                 return;
 
@@ -1284,6 +1340,10 @@ static void UpdateStateLed(AppState state)
 
         case STATE_DOWNLOAD:
             blink_interval_ms = 125U;
+            break;
+
+        case STATE_BLE_SYNC:
+            blink_interval_ms = 250U;
             break;
 
         default:
@@ -1723,6 +1783,59 @@ static void ProcessSensorTick(void)
     }
 }
 
+static void ProcessBleSync(uint32_t now_ms)
+{
+    uint8_t was_active = ble_sync_active;
+
+    if ((ble_sync_active == 0U) && (ble_sync_requested != 0U))
+    {
+        if (usb_flag != 0U)
+        {
+            ble_sync_requested = 0U;
+        }
+        else if (current_state == STATE_IDLE)
+        {
+            AudioScheduler_PauseForBleSync();
+            if (BleSync_StartSession(&nand_logger, now_ms) == 0)
+            {
+                current_state = STATE_BLE_SYNC;
+                state_led_initialized = 0U;
+            }
+            else
+            {
+                ble_sync_requested = 0U;
+                AudioScheduler_ResumeAfterBleSync(now_ms);
+                ble_sync_abort_led_last_toggle_ms = now_ms;
+                ble_sync_abort_led_until_ms = now_ms + 2000U;
+            }
+        }
+    }
+
+    if ((ble_sync_active != 0U) && (usb_flag != 0U))
+    {
+        BleSync_RequestUsbPreemption();
+    }
+
+    BleSync_Process(&nand_logger, now_ms, usb_flag);
+
+    if ((was_active != 0U) && (ble_sync_active == 0U))
+    {
+        AudioScheduler_ResumeAfterBleSync(now_ms);
+        current_state = (usb_flag != 0U) ?
+                        STATE_USB_CONNECTED : STATE_IDLE;
+        state_led_initialized = 0U;
+
+        if (ble_sync_sessions_aborted !=
+            ble_sync_observed_aborted_sessions)
+        {
+            ble_sync_observed_aborted_sessions = ble_sync_sessions_aborted;
+            ble_sync_abort_led_last_toggle_ms = now_ms;
+            ble_sync_abort_led_until_ms = now_ms + 2000U;
+            LED_On(LED_RED);
+        }
+    }
+}
+
 
 
 /**
@@ -1867,10 +1980,22 @@ MX_SPI3_Init();
   }
 #endif
 
+  int ble_sync_init_status = BleSync_Init(&nand_logger);
+  if (ble_sync_init_status != 0)
+  {
+    /* Logging remains available; BLE sync stays disabled until next reset. */
+    LED_On(LED_RED);
+  }
+
 #if (NAND_FORCE_ERASE_ON_BOOT != 0U)
   if (NANDLogger_EraseAllGoodBlocks(&nand_logger) != LOG_OK)
   {
     Error_Handler();
+  }
+  if ((ble_sync_init_status == 0) &&
+      (BleSync_StartNewLogGeneration() != 0))
+  {
+    LED_On(LED_RED);
   }
 #endif
 
@@ -1910,7 +2035,7 @@ MX_SPI3_Init();
                                AS7341_PROCESSING_GAIN);
   }
 
-  if (storage_full_latched == 0U)
+  if ((storage_full_latched == 0U) && (ble_sync_init_status == 0))
   {
     LED_Off(LED_RED);
   }
@@ -1928,7 +2053,9 @@ MX_SPI3_Init();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    AudioScheduler_Process(HAL_GetTick());
+    uint32_t main_loop_now_ms = HAL_GetTick();
+    ProcessBleSync(main_loop_now_ms);
+    AudioScheduler_Process(main_loop_now_ms);
     UpdateStateLed(current_state);
 
 	  switch(current_state)
@@ -2075,21 +2202,25 @@ MX_SPI3_Init();
 
           break;
 
-	  	  case STATE_USB_CONNECTED:
+          case STATE_USB_CONNECTED:
           if (download_requested)
           {
             download_requested = 0U;
             current_state = STATE_DOWNLOAD;
           }
-	  		 break;
+            break;
 
-	  	  case STATE_DOWNLOAD:
-	  		  if (NANDLogger_DownloadAll(&nand_logger) != LOG_OK) 
+          case STATE_DOWNLOAD:
+            if (NANDLogger_DownloadAll(&nand_logger) != LOG_OK)
           { 
-          Error_Handler();
+            Error_Handler();
           }
-			 current_state = STATE_USB_CONNECTED;
-	  		 break;
+            current_state = STATE_USB_CONNECTED;
+            break;
+
+          case STATE_BLE_SYNC:
+            /* BleSync_Process() advances the transfer outside interrupt context. */
+            break;
     }
 
   }
@@ -2142,7 +2273,10 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     {
         case STATE_IDLE:
         case STATE_ACQUISITION:
-        /* Monitoring is automatic; button presses are ignored in these states. */
+        ble_sync_requested = 1U;
+        break;
+        case STATE_BLE_SYNC:
+        ble_sync_abort_requested = 1U;
         break;
         case STATE_USB_CONNECTED:
         exit_flag = 0;
@@ -2710,5 +2844,3 @@ static void MX_GPIO_Init(void)
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
-
-

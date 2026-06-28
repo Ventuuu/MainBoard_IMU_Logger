@@ -37,5 +37,10 @@ void BLE_SetSlowAdvertisements(void);
 void BLE_SendData(uint8_t* data, uint8_t data_length);
 void BLE_ReceiveData(uint8_t* data, uint8_t data_length);
 void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t* data_buffer);
+int BLE_TransmitTransparent(const uint8_t *data,
+                            uint16_t data_length,
+                            uint32_t timeout_ms);
+int BLE_StartReceiveByteIT(uint8_t *byte);
+void BLE_FlushTransparentReceive(void);
 
 #endif /* INC_BLUETOOTH_H_ */

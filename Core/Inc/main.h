@@ -99,7 +99,8 @@ typedef enum {
     STATE_IDLE,          // The device is waiting for a command or event.
     STATE_ACQUISITION,   // The device is actively collecting sensor data.
     STATE_USB_CONNECTED, // The device is connected to a computer via USB.
-    STATE_DOWNLOAD       // The device is in the process of downloading data.
+    STATE_DOWNLOAD,      // The device is in the process of downloading data.
+    STATE_BLE_SYNC       // NAND synchronization over RN4871 Transparent UART.
 } AppState;
 /* USER CODE END Private defines */
 
