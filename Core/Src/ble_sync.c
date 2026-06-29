@@ -1113,6 +1113,101 @@ int BleSync_StartNewLogGeneration(void)
     return 0;
 }
 
+int BleSync_FactoryReset(NandLogger *logger)
+{
+    BleSyncContext *context = &ble_sync_context;
+    read_address_t erase_address;
+    uint32_t new_generation;
+    uint32_t primask;
+
+    if ((logger == NULL) || (ble_sync_active != 0U))
+    {
+        ble_sync_last_error = BLE_SYNC_ERROR_METADATA;
+        return -1;
+    }
+
+    new_generation = ble_sync_next_nonzero_sequence(ble_sync_log_generation);
+    context->logger = logger;
+    ble_sync_metadata_block_a = logger->sync_metadata_block_a;
+    ble_sync_metadata_block_b = logger->sync_metadata_block_b;
+
+    ble_sync_metadata_records_recovered = 0U;
+    ble_sync_metadata_records_written = 0U;
+    ble_sync_metadata_crc_errors = 0U;
+    ble_sync_metadata_write_errors = 0U;
+    ble_sync_metadata_erase_errors = 0U;
+
+    for (uint8_t slot = 0U; slot < BLE_SYNC_METADATA_RESERVED_BLOCKS; slot++)
+    {
+        erase_address = ble_sync_metadata_address(slot, 0U);
+        App_UpdateFactoryEraseLed();
+        if (spi_nand_block_erase(erase_address) != SPI_NAND_RET_OK)
+        {
+            ble_sync_metadata_erase_errors++;
+            ble_sync_last_error = BLE_SYNC_ERROR_METADATA;
+            return -1;
+        }
+    }
+
+    memset(context, 0, sizeof(*context));
+    memset((void *)&ble_sync_latest, 0, sizeof(ble_sync_latest));
+    context->logger = logger;
+    context->metadata_ready = 1U;
+    context->metadata_active_slot = 0U;
+    context->metadata_next_page = 0U;
+    context->metadata_sequence = 0U;
+    context->persisted_ack_valid = 0U;
+    BleSync_ResetParser(&context->parser);
+
+    ble_sync_log_generation = new_generation;
+    ble_sync_ack_valid = 0U;
+    ble_sync_acked_through_ram = 0U;
+    ble_sync_acked_through_persisted = 0U;
+
+    if (ble_sync_persist_state(new_generation, 0U, 0U) != 0)
+    {
+        ble_sync_last_error = BLE_SYNC_ERROR_METADATA;
+        return -1;
+    }
+
+    ble_sync_requested = 0U;
+    ble_sync_abort_requested = 0U;
+    ble_sync_active = 0U;
+    ble_sync_state = BLE_SYNC_IDLE;
+    ble_sync_pages_planned = 0U;
+    ble_sync_high_watermark = 0U;
+    ble_sync_high_watermark_physical_page = UINT32_MAX;
+    ble_sync_current_page_sequence = 0U;
+    ble_sync_current_physical_page = UINT32_MAX;
+    ble_sync_current_retry_count = 0U;
+    ble_sync_last_error = BLE_SYNC_ERROR_NONE;
+    ble_sync_last_abort_reason = BLE_SYNC_ABORT_NONE;
+    ble_sync_session_start_ms = 0U;
+    ble_sync_session_duration_ms = 0U;
+
+    (void)HAL_UART_AbortReceive(&huart3);
+    primask = __get_PRIMASK();
+    __disable_irq();
+    ble_sync_rx_head = 0U;
+    ble_sync_rx_tail = 0U;
+    ble_sync_uart_fault_pending = 0U;
+    ble_sync_uart_rx_byte = 0U;
+    BLE_FlushTransparentReceive();
+    if ((primask & 1U) == 0U)
+    {
+        __enable_irq();
+    }
+
+    if (BLE_StartReceiveByteIT((uint8_t *)&ble_sync_uart_rx_byte) != 0)
+    {
+        ble_sync_uart_errors++;
+        ble_sync_last_error = BLE_SYNC_ERROR_UART;
+        return -1;
+    }
+
+    return 0;
+}
+
 int BleSync_StartSession(NandLogger *logger, uint32_t now_ms)
 {
     BleSyncContext *context = &ble_sync_context;

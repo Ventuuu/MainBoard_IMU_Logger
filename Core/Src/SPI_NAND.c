@@ -67,8 +67,6 @@ extern uint8_t bad_blocks2[2048];
 extern uint8_t data_letto[4096];
 extern int exit_flag;
 
-static AppState current_state;
-
 // SPI basic functions
 void cs_deselect(void);
 void cs_select(void);
@@ -946,6 +944,8 @@ int spi_write(const uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
 // al posto che eliminarle le metto come commenti
 
 #if 0
+
+static AppState current_state;
 
 void write_memory()
 {

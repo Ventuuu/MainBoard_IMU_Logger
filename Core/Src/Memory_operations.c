@@ -1204,6 +1204,33 @@ LogStatus NANDLogger_Init(NandLogger *logger)
     return LOG_OK;
 }
 
+LogStatus NANDLogger_DiscardPendingBuffers(NandLogger *logger)
+{
+    if (logger == NULL)
+    {
+        return LOG_ERR_BAD_ARGUMENT;
+    }
+
+    logger->sensor_records_in_page = 0U;
+    logger->light_raw_records_in_page = 0U;
+    logger->light_raw_payload_bytes = 0U;
+    logger->audio_feature_records_in_page = 0U;
+    logger->audio_feature_payload_bytes = 0U;
+    logger->audio_feature_first_timestamp_ms = 0U;
+    logger->light_feature_records_in_page = 0U;
+    logger->light_feature_payload_bytes = 0U;
+    logger->light_feature_first_timestamp_ms = 0U;
+    audio_feature_records_pending = 0U;
+    light_feature_records_pending = 0U;
+
+    memset(logger->sensor_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
+    logger_reset_light_raw_page_buffer(logger, 1U);
+    memset(logger->audio_feature_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
+    memset(logger->light_feature_page_buffer, 0xFF, NAND_PAGE_SIZE_BYTES);
+
+    return LOG_OK;
+}
+
 
 LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger)
 {
@@ -1231,6 +1258,7 @@ LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger)
     for (uint16_t i = 0U; i < logger->good_block_count; i++)
     {
         addr.block = logger->good_blocks[i];
+        App_UpdateFactoryEraseLed();
 
         nand_erase_attempts++;
 

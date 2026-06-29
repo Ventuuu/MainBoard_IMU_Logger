@@ -146,6 +146,7 @@ extern volatile BleSyncLatestDiagnostics ble_sync_latest;
 
 int BleSync_Init(NandLogger *logger);
 int BleSync_StartNewLogGeneration(void);
+int BleSync_FactoryReset(NandLogger *logger);
 int BleSync_StartSession(NandLogger *logger, uint32_t now_ms);
 void BleSync_Process(NandLogger *logger, uint32_t now_ms, uint8_t usb_active);
 void BleSync_RequestUsbPreemption(void);

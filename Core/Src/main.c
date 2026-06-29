@@ -124,6 +124,7 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 #define LIGHT_FLAG_I2C_ERROR (1U << 4)
 #define LIGHT_FLAG_SMUX_ERROR (1U << 5)
 #define USER_BUTTON_DEBOUNCE_MS 250U
+#define USER_BUTTON_LONG_PRESS_MS 5000U
 #define NAND_STARTUP_SELF_TEST_ENABLE 0U
 #ifndef NAND_FORCE_ERASE_ON_BOOT
 #define NAND_FORCE_ERASE_ON_BOOT 0U
@@ -136,6 +137,18 @@ typedef struct
 {
     int16_t samples[AUDIO_CHUNK_SAMPLES];
 } AudioRingSlot;
+
+typedef enum
+{
+    FACTORY_ERASE_ERROR_NONE = 0,
+    FACTORY_ERASE_ERROR_NOT_IDLE,
+    FACTORY_ERASE_ERROR_MDF_STOP,
+    FACTORY_ERASE_ERROR_BUFFER_DISCARD,
+    FACTORY_ERASE_ERROR_DATA_ERASE,
+    FACTORY_ERASE_ERROR_DATA_RECOVERY,
+    FACTORY_ERASE_ERROR_BLE_METADATA,
+    FACTORY_ERASE_ERROR_BLE_UART
+} FactoryEraseError;
 
 typedef enum
 {
@@ -378,12 +391,28 @@ static volatile uint8_t stop_acquisition_requested = 0U;
 static volatile uint8_t download_requested = 0U;
 static volatile uint32_t sensor_tick_pending = 0U;
 static volatile uint32_t user_button_last_event_ms = 0U;
+static volatile uint8_t user_button_pressed = 0U;
+static volatile uint8_t user_button_release_pending = 0U;
+static volatile uint8_t user_button_long_press_triggered = 0U;
+static volatile uint32_t user_button_press_start_ms = 0U;
+static volatile AppState user_button_press_state = STATE_IDLE;
+static volatile uint8_t factory_erase_requested = 0U;
+static volatile uint8_t factory_erase_in_progress = 0U;
 
 volatile uint32_t button_rising_count = 0U;
+volatile uint32_t button_short_press_count = 0U;
+volatile uint32_t button_long_press_count = 0U;
 volatile uint32_t start_request_count = 0U;
 volatile uint32_t stop_request_count = 0U;
 volatile uint32_t download_request_count = 0U;
 volatile AppState debug_state_at_button = STATE_IDLE;
+volatile uint32_t factory_erase_request_count = 0U;
+volatile uint32_t factory_erase_attempt_count = 0U;
+volatile uint32_t factory_erase_completed_count = 0U;
+volatile uint32_t factory_erase_failure_count = 0U;
+volatile uint32_t factory_erase_rejected_count = 0U;
+volatile uint32_t factory_erase_duration_ms = 0U;
+volatile int32_t factory_erase_last_error = FACTORY_ERASE_ERROR_NONE;
 
 // --- IMU data ---
 static IMU_Data accelerometer_data;
@@ -482,6 +511,9 @@ static void AudioScheduler_RecordWindowEnd(uint32_t end_ms);
 static void AudioScheduler_PauseForBleSync(void);
 static void AudioScheduler_ResumeAfterBleSync(uint32_t now_ms);
 static void ProcessBleSync(uint32_t now_ms);
+static void UserButton_HandleShortPress(AppState pressed_state);
+static void UserButton_Process(uint32_t now_ms);
+static int SmartWearable_FactoryEraseNand(void);
 
 /* USER CODE END PFP */
 
@@ -498,6 +530,207 @@ static Time_Struct Time_FromElapsedMilliseconds(uint32_t elapsed_ms)
     t.sss = (uint16_t)(elapsed_ms % 1000U);
 
     return t;
+}
+
+static void UserButton_HandleShortPress(AppState pressed_state)
+{
+    button_short_press_count++;
+
+    switch (pressed_state)
+    {
+        case STATE_IDLE:
+        case STATE_ACQUISITION:
+            ble_sync_requested = 1U;
+            break;
+
+        case STATE_BLE_SYNC:
+            if (ble_sync_active != 0U)
+            {
+                ble_sync_abort_requested = 1U;
+            }
+            break;
+
+        case STATE_USB_CONNECTED:
+            exit_flag = 0;
+            download_requested = 1U;
+            download_request_count++;
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void UserButton_Process(uint32_t now_ms)
+{
+    GPIO_PinState pin_state;
+
+    if ((factory_erase_in_progress != 0U) ||
+        (user_button_pressed == 0U))
+    {
+        return;
+    }
+
+    if (user_button_press_state == STATE_IDLE)
+    {
+        start_acquisition_requested = 0U;
+        ble_sync_requested = 0U;
+    }
+
+    pin_state = HAL_GPIO_ReadPin(USER_BUTTON_GPIO_Port, USER_BUTTON_Pin);
+    if ((pin_state == GPIO_PIN_RESET) &&
+        ((now_ms - user_button_last_event_ms) >= USER_BUTTON_DEBOUNCE_MS))
+    {
+        if ((user_button_long_press_triggered == 0U) &&
+            ((now_ms - user_button_press_start_ms) >= USER_BUTTON_LONG_PRESS_MS) &&
+            (user_button_press_state == STATE_IDLE) &&
+            (current_state == STATE_IDLE) &&
+            (usb_flag == 0U) &&
+            (ble_sync_active == 0U) &&
+            (microphone_active == 0U))
+        {
+            user_button_long_press_triggered = 1U;
+            factory_erase_requested = 1U;
+            button_long_press_count++;
+            factory_erase_request_count++;
+        }
+
+        AppState pressed_state = user_button_press_state;
+        uint8_t long_press_triggered = user_button_long_press_triggered;
+
+        user_button_pressed = 0U;
+        user_button_release_pending = 0U;
+        user_button_long_press_triggered = 0U;
+        user_button_press_start_ms = 0U;
+        user_button_press_state = STATE_IDLE;
+        user_button_last_event_ms = now_ms;
+
+        if (long_press_triggered == 0U)
+        {
+            UserButton_HandleShortPress(pressed_state);
+        }
+        return;
+    }
+
+    if ((pin_state == GPIO_PIN_SET) &&
+        (user_button_release_pending != 0U))
+    {
+        user_button_release_pending = 0U;
+    }
+
+    if ((user_button_long_press_triggered == 0U) &&
+        ((now_ms - user_button_press_start_ms) >= USER_BUTTON_LONG_PRESS_MS) &&
+        (user_button_press_state == STATE_IDLE) &&
+        (current_state == STATE_IDLE) &&
+        (usb_flag == 0U) &&
+        (ble_sync_active == 0U) &&
+        (microphone_active == 0U))
+    {
+        user_button_long_press_triggered = 1U;
+        factory_erase_requested = 1U;
+        button_long_press_count++;
+        factory_erase_request_count++;
+    }
+}
+
+static int SmartWearable_FactoryEraseNand(void)
+{
+    uint32_t erase_start_ms = HAL_GetTick();
+    LogStatus logger_status;
+
+    if ((current_state != STATE_IDLE) || (usb_flag != 0U) ||
+        (ble_sync_active != 0U))
+    {
+        factory_erase_requested = 0U;
+        factory_erase_rejected_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_NOT_IDLE;
+        return 1;
+    }
+
+    factory_erase_requested = 0U;
+    factory_erase_in_progress = 1U;
+    factory_erase_attempt_count++;
+    factory_erase_last_error = FACTORY_ERASE_ERROR_NONE;
+    factory_erase_duration_ms = 0U;
+
+    start_acquisition_requested = 0U;
+    stop_acquisition_requested = 0U;
+    download_requested = 0U;
+    ble_sync_requested = 0U;
+    ble_sync_abort_requested = 0U;
+    sensor_tick_pending = 0U;
+    light_measurement_pending = 0U;
+    acquisition_paused_for_ble_sync = 1U;
+    audio_accept_chunks = 0U;
+
+    current_state = STATE_FACTORY_ERASE;
+    state_led_initialized = 0U;
+    UpdateStateLed(current_state);
+    HAL_TIM_Base_Stop_IT(&htim2);
+
+    if (microphone_active != 0U)
+    {
+        if (HAL_MDF_AcqStop_DMA(&MdfHandle0) != HAL_OK)
+        {
+            factory_erase_failure_count++;
+            factory_erase_last_error = FACTORY_ERASE_ERROR_MDF_STOP;
+            return -1;
+        }
+        microphone_active = 0U;
+    }
+
+    AudioRing_Reset();
+    audio_window_pcm_samples = 0U;
+
+    logger_status = NANDLogger_DiscardPendingBuffers(&nand_logger);
+    if (logger_status != LOG_OK)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_BUFFER_DISCARD;
+        return -1;
+    }
+
+    logger_status = NANDLogger_EraseAllGoodBlocks(&nand_logger);
+    if (logger_status != LOG_OK)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_DATA_ERASE;
+        return -1;
+    }
+
+    logger_status = NANDLogger_Recover(&nand_logger);
+    if (logger_status != LOG_OK)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_DATA_RECOVERY;
+        return -1;
+    }
+
+    if (BleSync_FactoryReset(&nand_logger) != 0)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error =
+                (ble_sync_last_error == BLE_SYNC_ERROR_UART) ?
+                FACTORY_ERASE_ERROR_BLE_UART :
+                FACTORY_ERASE_ERROR_BLE_METADATA;
+        return -1;
+    }
+
+    current_window_sequence = 0U;
+    next_window_sequence = nand_recovered_next_window_sequence;
+    audio_scheduler_first_deadline_ms = HAL_GetTick() + AUDIO_WINDOW_PERIOD_MS;
+    audio_scheduler_next_deadline_ms = audio_scheduler_first_deadline_ms;
+    audio_scheduler_last_busy_interval_valid = 0U;
+    acquisition_paused_for_ble_sync = 0U;
+
+    factory_erase_duration_ms = HAL_GetTick() - erase_start_ms;
+    factory_erase_completed_count++;
+    factory_erase_in_progress = 0U;
+    current_state = STATE_IDLE;
+    state_led_initialized = 0U;
+    UpdateStateLed(current_state);
+
+    return 0;
 }
 
 static uint8_t AudioScheduler_DeadlineWasBusy(uint32_t deadline_ms)
@@ -566,6 +799,9 @@ static void AudioScheduler_Process(uint32_t now_ms)
 
     if ((audio_scheduler_enabled == 0U) ||
         (acquisition_paused_for_ble_sync != 0U) ||
+        (user_button_pressed != 0U) ||
+        (factory_erase_requested != 0U) ||
+        (factory_erase_in_progress != 0U) ||
         (ble_sync_requested != 0U) ||
         ((int32_t)(now_ms - audio_scheduler_next_deadline_ms) < 0))
     {
@@ -1267,7 +1503,7 @@ static void UpdateStateLed(AppState state)
     uint32_t now = HAL_GetTick();
     uint32_t blink_interval_ms = 0U;
 
-    if (storage_full_latched != 0U)
+    if ((storage_full_latched != 0U) && (state != STATE_FACTORY_ERASE))
     {
         LED_On(LED_GREEN);
         LED_On(LED_RED);
@@ -1318,6 +1554,11 @@ static void UpdateStateLed(AppState state)
                 LED_On(LED_GREEN);
                 return;
 
+            case STATE_FACTORY_ERASE:
+                LED_Off(LED_RED);
+                LED_On(LED_GREEN);
+                return;
+
             default:
                 LED_Off(LED_GREEN);
                 return;
@@ -1346,6 +1587,10 @@ static void UpdateStateLed(AppState state)
             blink_interval_ms = 250U;
             break;
 
+        case STATE_FACTORY_ERASE:
+            blink_interval_ms = 250U;
+            break;
+
         default:
             LED_Off(LED_GREEN);
             break;
@@ -1362,6 +1607,14 @@ static void UpdateStateLed(AppState state)
 void App_UpdateDownloadLed(void)
 {
     UpdateStateLed(STATE_DOWNLOAD);
+}
+
+void App_UpdateFactoryEraseLed(void)
+{
+    if (factory_erase_in_progress != 0U)
+    {
+        UpdateStateLed(STATE_FACTORY_ERASE);
+    }
 }
 
 static void MicDiagnostics_UpdateErrorCodes(void)
@@ -2054,6 +2307,18 @@ MX_SPI3_Init();
 
     /* USER CODE BEGIN 3 */
     uint32_t main_loop_now_ms = HAL_GetTick();
+    UserButton_Process(main_loop_now_ms);
+
+    if (factory_erase_requested != 0U)
+    {
+      int factory_erase_result = SmartWearable_FactoryEraseNand();
+      if (factory_erase_result < 0)
+      {
+        Error_Handler();
+      }
+      main_loop_now_ms = HAL_GetTick();
+    }
+
     ProcessBleSync(main_loop_now_ms);
     AudioScheduler_Process(main_loop_now_ms);
     UpdateStateLed(current_state);
@@ -2221,6 +2486,10 @@ MX_SPI3_Init();
           case STATE_BLE_SYNC:
             /* BleSync_Process() advances the transfer outside interrupt context. */
             break;
+
+          case STATE_FACTORY_ERASE:
+            /* SmartWearable_FactoryEraseNand() owns this synchronous state. */
+            break;
     }
 
   }
@@ -2258,6 +2527,13 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
         return;
     }
 
+    if ((factory_erase_in_progress != 0U) ||
+        (user_button_pressed != 0U) ||
+        (HAL_GPIO_ReadPin(USER_BUTTON_GPIO_Port, USER_BUTTON_Pin) != GPIO_PIN_SET))
+    {
+        return;
+    }
+
     now = HAL_GetTick();
 
     if ((now - user_button_last_event_ms) < USER_BUTTON_DEBOUNCE_MS)
@@ -2266,32 +2542,28 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     }
 
     user_button_last_event_ms = now;
+    user_button_pressed = 1U;
+    user_button_release_pending = 0U;
+    user_button_long_press_triggered = 0U;
+    user_button_press_start_ms = now;
+    user_button_press_state = current_state;
     button_rising_count++;
     debug_state_at_button = current_state;
 
-    switch(current_state)
+    if (current_state == STATE_IDLE)
     {
-        case STATE_IDLE:
-        case STATE_ACQUISITION:
-        ble_sync_requested = 1U;
-        break;
-        case STATE_BLE_SYNC:
-        ble_sync_abort_requested = 1U;
-        break;
-        case STATE_USB_CONNECTED:
-        exit_flag = 0;
-        download_requested = 1U;
-        download_request_count++;
-        break;
-        default:
-        break;
+        start_acquisition_requested = 0U;
+        ble_sync_requested = 0U;
     }
 }
 
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
-	if(GPIO_Pin == USER_BUTTON_Pin)
+	if ((GPIO_Pin == USER_BUTTON_Pin) &&
+        (factory_erase_in_progress == 0U) &&
+        (user_button_pressed != 0U))
 	{
+        user_button_release_pending = 1U;
 	}
 }
 
@@ -2807,7 +3079,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : USER_BUTTON_Pin */
   GPIO_InitStruct.Pin = USER_BUTTON_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(USER_BUTTON_GPIO_Port, &GPIO_InitStruct);
 

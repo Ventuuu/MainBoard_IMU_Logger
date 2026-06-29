@@ -354,6 +354,8 @@ LogStatus NANDLogger_Init(NandLogger *logger);
 
 LogStatus NANDLogger_Recover(NandLogger *logger);
 
+LogStatus NANDLogger_DiscardPendingBuffers(NandLogger *logger);
+
 LogStatus NANDLogger_EraseAllGoodBlocks(NandLogger *logger);
 
 LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,

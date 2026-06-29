@@ -56,6 +56,7 @@ void Error_Handler(void);
 /* USER CODE BEGIN EFP */
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 void App_UpdateDownloadLed(void);
+void App_UpdateFactoryEraseLed(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -100,7 +101,8 @@ typedef enum {
     STATE_ACQUISITION,   // The device is actively collecting sensor data.
     STATE_USB_CONNECTED, // The device is connected to a computer via USB.
     STATE_DOWNLOAD,      // The device is in the process of downloading data.
-    STATE_BLE_SYNC       // NAND synchronization over RN4871 Transparent UART.
+    STATE_BLE_SYNC,      // NAND synchronization over RN4871 Transparent UART.
+    STATE_FACTORY_ERASE  // User-requested secure reset of data and sync metadata.
 } AppState;
 /* USER CODE END Private defines */
 
