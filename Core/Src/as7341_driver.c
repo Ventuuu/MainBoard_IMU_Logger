@@ -18,6 +18,30 @@ extern I2C_HandleTypeDef hi2c3;
 #define AS7341_SMUX_TIMEOUT_MS        100U
 #define AS7341_INTEGRATION_TIMEOUT_MS 150U
 
+typedef enum {
+    AS7341_ASYNC_IDLE = 0,
+    AS7341_ASYNC_SETUP_LOW,
+    AS7341_ASYNC_WAIT_SMUX_LOW,
+    AS7341_ASYNC_START_LOW,
+    AS7341_ASYNC_WAIT_DATA_LOW,
+    AS7341_ASYNC_READ_LOW,
+    AS7341_ASYNC_SETUP_HIGH,
+    AS7341_ASYNC_WAIT_SMUX_HIGH,
+    AS7341_ASYNC_START_HIGH,
+    AS7341_ASYNC_WAIT_DATA_HIGH,
+    AS7341_ASYNC_READ_HIGH
+} AS7341_AsyncState;
+
+typedef struct {
+    AS7341_AsyncState state;
+    AS7341_Spectrum *destination;
+    uint16_t low[6];
+    uint16_t high[6];
+    uint32_t deadline_ms;
+} AS7341_AsyncContext;
+
+static AS7341_AsyncContext as7341_async;
+
 #if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
 volatile uint16_t raw_smux_low_ch[6] = {0U};
 volatile uint16_t raw_smux_high_ch[6] = {0U};
@@ -69,6 +93,9 @@ static uint8_t as7341_smux_apply(AS7341_SmuxCmd cmd);
 static uint8_t as7341_smux_setup_F1F4_Clear_NIR(void);
 static uint8_t as7341_smux_setup_F5F8_Clear_NIR(void);
 static uint8_t as7341_smux_setup_FlickerPD(void);
+static uint8_t as7341_async_setup_phase(uint8_t high_phase);
+static uint8_t as7341_async_read_six_channels(uint16_t *dst6);
+static AS7341_AsyncResult as7341_async_fail(void);
 static uint16_t as7341_decode_flicker_mains(uint8_t fd_status);
 #if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
 static void as7341_update_register_diagnostics(void);
@@ -155,6 +182,147 @@ uint8_t AS7341_ReadSixChannels(uint16_t *dst6) {
     }
 
     return 1;
+}
+
+uint8_t AS7341_StartFullSpectrumAsync(AS7341_Spectrum *spectrum) {
+    if ((spectrum == NULL) || (as7341_async.state != AS7341_ASYNC_IDLE)) {
+        return 0U;
+    }
+
+    as7341_async.destination = spectrum;
+    as7341_async.deadline_ms = 0U;
+    for (uint8_t i = 0U; i < 6U; i++) {
+        as7341_async.low[i] = 0U;
+        as7341_async.high[i] = 0U;
+    }
+    as7341_async.state = AS7341_ASYNC_SETUP_LOW;
+    return 1U;
+}
+
+AS7341_AsyncResult AS7341_ProcessFullSpectrumAsync(uint32_t now_ms) {
+    uint8_t value = 0U;
+
+    switch (as7341_async.state) {
+        case AS7341_ASYNC_IDLE:
+            return AS7341_ASYNC_ERROR;
+
+        case AS7341_ASYNC_SETUP_LOW:
+            if (!as7341_async_setup_phase(0U)) return as7341_async_fail();
+            as7341_async.deadline_ms = now_ms + AS7341_SMUX_TIMEOUT_MS;
+            as7341_async.state = AS7341_ASYNC_WAIT_SMUX_LOW;
+            return AS7341_ASYNC_BUSY;
+
+        case AS7341_ASYNC_WAIT_SMUX_LOW:
+        case AS7341_ASYNC_WAIT_SMUX_HIGH:
+            if (!as7341_read_register(AS7341_REG_ENABLE, &value, 1U)) {
+                return as7341_async_fail();
+            }
+            if ((value & AS7341_SMUXEN) != 0U) {
+                if ((int32_t)(now_ms - as7341_async.deadline_ms) >= 0) {
+                    AS7341_DIAG_INC(as7341_diag_smux_timeout_count);
+                    return as7341_async_fail();
+                }
+                return AS7341_ASYNC_BUSY;
+            }
+            as7341_async.state =
+                    (as7341_async.state == AS7341_ASYNC_WAIT_SMUX_LOW) ?
+                    AS7341_ASYNC_START_LOW : AS7341_ASYNC_START_HIGH;
+            return AS7341_ASYNC_BUSY;
+
+        case AS7341_ASYNC_START_LOW:
+        case AS7341_ASYNC_START_HIGH:
+            if (!as7341_enable_spectral_measurement()) return as7341_async_fail();
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+            if (as7341_read_register(AS7341_REG_ENABLE, &value, 1U)) {
+                if (as7341_async.state == AS7341_ASYNC_START_LOW) {
+                    as7341_diag_enable_after_low_start = value;
+                } else {
+                    as7341_diag_enable_after_high_start = value;
+                }
+            }
+#endif
+            as7341_async.deadline_ms = now_ms + AS7341_INTEGRATION_TIMEOUT_MS;
+            as7341_async.state =
+                    (as7341_async.state == AS7341_ASYNC_START_LOW) ?
+                    AS7341_ASYNC_WAIT_DATA_LOW : AS7341_ASYNC_WAIT_DATA_HIGH;
+            return AS7341_ASYNC_BUSY;
+
+        case AS7341_ASYNC_WAIT_DATA_LOW:
+        case AS7341_ASYNC_WAIT_DATA_HIGH:
+            if (!as7341_read_register(AS7341_REG_STATUS2, &value, 1U)) {
+                return as7341_async_fail();
+            }
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+            as7341_diag_status2 = value;
+#endif
+            if ((value & AS7341_AVALID) == 0U) {
+                if ((int32_t)(now_ms - as7341_async.deadline_ms) >= 0) {
+                    AS7341_DIAG_INC(as7341_diag_integration_timeout_count);
+                    return as7341_async_fail();
+                }
+                return AS7341_ASYNC_BUSY;
+            }
+            as7341_async.state =
+                    (as7341_async.state == AS7341_ASYNC_WAIT_DATA_LOW) ?
+                    AS7341_ASYNC_READ_LOW : AS7341_ASYNC_READ_HIGH;
+            return AS7341_ASYNC_BUSY;
+
+        case AS7341_ASYNC_READ_LOW:
+            if (!as7341_async_read_six_channels(as7341_async.low) ||
+                !as7341_disable_spectral_and_flicker()) {
+                return as7341_async_fail();
+            }
+            as7341_async.state = AS7341_ASYNC_SETUP_HIGH;
+            return AS7341_ASYNC_BUSY;
+
+        case AS7341_ASYNC_SETUP_HIGH:
+            if (!as7341_async_setup_phase(1U)) return as7341_async_fail();
+            as7341_async.deadline_ms = now_ms + AS7341_SMUX_TIMEOUT_MS;
+            as7341_async.state = AS7341_ASYNC_WAIT_SMUX_HIGH;
+            return AS7341_ASYNC_BUSY;
+
+        case AS7341_ASYNC_READ_HIGH:
+            if (!as7341_async_read_six_channels(as7341_async.high) ||
+                !as7341_disable_spectral_and_flicker()) {
+                return as7341_async_fail();
+            }
+
+            for (uint8_t i = 0U; i < 4U; i++) {
+                as7341_async.destination->ch[i] = as7341_async.low[i];
+                as7341_async.destination->ch[i + 4U] = as7341_async.high[i];
+            }
+            as7341_async.destination->ch[8] = (uint16_t)(
+                    ((uint32_t)as7341_async.low[4] + as7341_async.high[4] + 1U) / 2U);
+            as7341_async.destination->ch[9] = (uint16_t)(
+                    ((uint32_t)as7341_async.low[5] + as7341_async.high[5] + 1U) / 2U);
+            as7341_async.destination->ch[10] = as7341_async.high[4];
+            as7341_async.destination->ch[11] = as7341_async.high[5];
+
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+            for (uint8_t i = 0U; i < 6U; i++) {
+                raw_smux_low_ch[i] = as7341_async.low[i];
+                raw_smux_high_ch[i] = as7341_async.high[i];
+            }
+            final_f1 = as7341_async.destination->ch[0];
+            final_f2 = as7341_async.destination->ch[1];
+            final_f3 = as7341_async.destination->ch[2];
+            final_f4 = as7341_async.destination->ch[3];
+            final_f5 = as7341_async.destination->ch[4];
+            final_f6 = as7341_async.destination->ch[5];
+            final_f7 = as7341_async.destination->ch[6];
+            final_f8 = as7341_async.destination->ch[7];
+            final_clear = as7341_async.destination->ch[8];
+            final_nir = as7341_async.destination->ch[9];
+            as7341_update_register_diagnostics();
+            AS7341_DIAG_INC(as7341_diag_completed_acquisition_count);
+#endif
+            as7341_async.destination = NULL;
+            as7341_async.state = AS7341_ASYNC_IDLE;
+            return AS7341_ASYNC_COMPLETE;
+
+        default:
+            return as7341_async_fail();
+    }
 }
 
 uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum) {
@@ -401,6 +569,80 @@ static uint8_t as7341_enable_spectral_measurement(void) {
     enable |= (AS7341_PON | AS7341_SP_EN);
 
     return as7341_write_register(AS7341_REG_ENABLE, enable);
+}
+
+static uint8_t as7341_async_setup_phase(uint8_t high_phase) {
+    uint8_t cfg6 = 0U;
+    uint8_t enable = 0U;
+
+    if (!as7341_read_register(AS7341_REG_ENABLE, &enable, 1U)) return 0U;
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+    if (high_phase != 0U) {
+        as7341_diag_enable_before_high_smux = enable;
+    } else {
+        as7341_diag_enable_before_low_smux = enable;
+    }
+#endif
+
+    if (!as7341_disable_spectral_and_flicker() ||
+        !as7341_select_regbank(0U)) {
+        return 0U;
+    }
+
+    if (high_phase != 0U) {
+        if (!as7341_smux_setup_F5F8_Clear_NIR()) return 0U;
+    } else if (!as7341_smux_setup_F1F4_Clear_NIR()) {
+        return 0U;
+    }
+
+    if (!as7341_select_regbank(0U) ||
+        !as7341_read_register(AS7341_REG_CFG6, &cfg6, 1U)) {
+        return 0U;
+    }
+
+    cfg6 &= (uint8_t)~0x18U;
+    cfg6 |= (uint8_t)(((uint8_t)AS7341_SMUX_CMD_WRITE & 0x03U) << 3U);
+    if (!as7341_write_register(AS7341_REG_CFG6, cfg6) ||
+        !as7341_read_register(AS7341_REG_ENABLE, &enable, 1U)) {
+        return 0U;
+    }
+
+    enable &= (uint8_t)~(AS7341_SP_EN | AS7341_FDEN);
+    enable |= (AS7341_PON | AS7341_SMUXEN);
+    if (!as7341_write_register(AS7341_REG_ENABLE, enable)) return 0U;
+
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+    if (high_phase != 0U) {
+        as7341_diag_enable_after_high_smux = enable;
+    } else {
+        as7341_diag_enable_after_low_smux = enable;
+    }
+#endif
+    return 1U;
+}
+
+static uint8_t as7341_async_read_six_channels(uint16_t *dst6) {
+    uint8_t buf[12];
+
+    if ((dst6 == NULL) ||
+        !as7341_read_register(AS7341_REG_CH0_L, buf, sizeof(buf))) {
+        return 0U;
+    }
+
+    for (uint8_t i = 0U; i < 6U; i++) {
+        dst6[i] = (uint16_t)(((uint16_t)buf[2U * i + 1U] << 8U) |
+                             buf[2U * i]);
+    }
+    return 1U;
+}
+
+static AS7341_AsyncResult as7341_async_fail(void) {
+    (void)as7341_disable_spectral_and_flicker();
+    (void)as7341_select_regbank(0U);
+    as7341_async.destination = NULL;
+    as7341_async.state = AS7341_ASYNC_IDLE;
+    AS7341_DIAG_INC(as7341_diag_discarded_sample_count);
+    return AS7341_ASYNC_ERROR;
 }
 
 static uint8_t as7341_read_smux_phase(uint8_t (*setup_fn)(void),

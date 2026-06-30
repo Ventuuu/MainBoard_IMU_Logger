@@ -106,6 +106,59 @@ void IMU_ConfigGyroscope(uint8_t odr, uint8_t scale, uint8_t high_performance_mo
     imu_write_register(IMU_GYR_CTRL7_REG, ctrl7_value);
 }
 
+uint8_t IMU_EnableCoherentReads(void) {
+    uint8_t ctrl3 = 0U;
+
+    if (!imu_read_register(IMU_CTRL3_REG, &ctrl3, 1U)) {
+        return 0U;
+    }
+
+    ctrl3 |= (IMU_CTRL3_BDU | IMU_CTRL3_IF_INC);
+    return imu_write_register(IMU_CTRL3_REG, ctrl3);
+}
+
+uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
+                             IMU_Data *gyro_data,
+                             uint8_t *raw_accelerometer,
+                             uint8_t *raw_gyroscope) {
+    uint8_t raw[12];
+    int16_t acc_x;
+    int16_t acc_y;
+    int16_t acc_z;
+    int16_t gyro_x;
+    int16_t gyro_y;
+    int16_t gyro_z;
+
+    if ((acc_data == NULL) || (gyro_data == NULL) ||
+        (raw_accelerometer == NULL) || (raw_gyroscope == NULL)) {
+        return 0U;
+    }
+
+    /* Gyroscope 0x22..0x27 and accelerometer 0x28..0x2D are contiguous. */
+    if (!imu_read_register(IMU_GYR_OUT_X_L_REG, raw, sizeof(raw))) {
+        return 0U;
+    }
+
+    memcpy(raw_gyroscope, &raw[0], 6U);
+    memcpy(raw_accelerometer, &raw[6], 6U);
+
+    gyro_x = (int16_t)(((uint16_t)raw[1] << 8U) | raw[0]);
+    gyro_y = (int16_t)(((uint16_t)raw[3] << 8U) | raw[2]);
+    gyro_z = (int16_t)(((uint16_t)raw[5] << 8U) | raw[4]);
+    acc_x = (int16_t)(((uint16_t)raw[7] << 8U) | raw[6]);
+    acc_y = (int16_t)(((uint16_t)raw[9] << 8U) | raw[8]);
+    acc_z = (int16_t)(((uint16_t)raw[11] << 8U) | raw[10]);
+
+    gyro_data->x = (float)gyro_x * get_gyro_sensitivity(gyroscope_full_scale);
+    gyro_data->y = (float)gyro_y * get_gyro_sensitivity(gyroscope_full_scale);
+    gyro_data->z = (float)gyro_z * get_gyro_sensitivity(gyroscope_full_scale);
+    acc_data->x = (float)acc_x * get_accel_sensitivity(accelerometer_full_scale);
+    acc_data->y = (float)acc_y * get_accel_sensitivity(accelerometer_full_scale);
+    acc_data->z = (float)acc_z * get_accel_sensitivity(accelerometer_full_scale);
+
+    return 1U;
+}
+
 /**
  * @brief Reads the accelerometer data from the sensor and converts it to 'g'.
  * @param acc_data Pointer to an IMU_Data struct to store the converted data.

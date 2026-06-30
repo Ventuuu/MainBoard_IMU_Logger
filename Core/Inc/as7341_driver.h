@@ -112,6 +112,12 @@ typedef struct {
     uint16_t ch[12];
 } AS7341_Spectrum;
 
+typedef enum {
+    AS7341_ASYNC_ERROR = -1,
+    AS7341_ASYNC_BUSY = 0,
+    AS7341_ASYNC_COMPLETE = 1
+} AS7341_AsyncResult;
+
 #if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
 extern volatile uint16_t raw_smux_low_ch[6];
 extern volatile uint16_t raw_smux_high_ch[6];
@@ -175,6 +181,12 @@ uint8_t AS7341_ReadSixChannels(uint16_t *dst6);
  * @return 1 on success, 0 on error/timeout.
  */
 uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum);
+
+/** Start a non-blocking two-phase SMUX acquisition. */
+uint8_t AS7341_StartFullSpectrumAsync(AS7341_Spectrum *spectrum);
+
+/** Advance the non-blocking acquisition by one short state-machine step. */
+AS7341_AsyncResult AS7341_ProcessFullSpectrumAsync(uint32_t now_ms);
 
 /**
  * @brief Runs the on-chip flicker engine and returns an equivalent mains

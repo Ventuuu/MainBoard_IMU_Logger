@@ -84,12 +84,33 @@ volatile uint32_t mcu_reset_csr_at_boot = 0U;
 #define AUDIO_CHUNK_SAMPLES 1024U
 #define AUDIO_DMA_BUFFER_SAMPLES (2U * AUDIO_CHUNK_SAMPLES)
 #define AUDIO_RING_SLOT_COUNT 32U
-#define AUDIO_WINDOW_TARGET_SAMPLES 24000U
-#define AUDIO_WINDOW_REQUIRED_CHUNKS \
-    ((AUDIO_WINDOW_TARGET_SAMPLES + AUDIO_CHUNK_SAMPLES - 1U) / AUDIO_CHUNK_SAMPLES)
-#define AUDIO_WINDOW_PERIOD_MS 10000U
-#define AUDIO_BASIC_FEATURE_HISTORY_CAPACITY 16U
+#define SENSOR_EPOCH_MS 2000U
+#define IMU_ODR_HZ 100U
+#define IMU_HARDWARE_ODR_HZ 104U
+#define IMU_SAMPLE_PERIOD_MS (1000U / IMU_ODR_HZ)
 #define AUDIO_SAMPLE_RATE_HZ 48000U
+#define AUDIO_VALID_WINDOW_MS 1000U
+#define AUDIO_WARMUP_MS 10U
+#define AUDIO_PERIOD_MS SENSOR_EPOCH_MS
+#define LIGHT_PERIOD_MS SENSOR_EPOCH_MS
+#define AUDIO_WINDOW_TARGET_SAMPLES \
+    ((AUDIO_SAMPLE_RATE_HZ * AUDIO_VALID_WINDOW_MS) / 1000U)
+#define AUDIO_WARMUP_SAMPLES \
+    ((AUDIO_SAMPLE_RATE_HZ * AUDIO_WARMUP_MS + 999U) / 1000U)
+#define AUDIO_HARDWARE_WARMUP_SAMPLES 255U
+#define AUDIO_SOFTWARE_WARMUP_SAMPLES \
+    (AUDIO_WARMUP_SAMPLES - AUDIO_HARDWARE_WARMUP_SAMPLES)
+#define AUDIO_CAPTURE_TARGET_SAMPLES \
+    (AUDIO_WINDOW_TARGET_SAMPLES + AUDIO_WARMUP_SAMPLES)
+#define AUDIO_DMA_TARGET_SAMPLES \
+    (AUDIO_WINDOW_TARGET_SAMPLES + AUDIO_SOFTWARE_WARMUP_SAMPLES)
+#define AUDIO_WINDOW_REQUIRED_CHUNKS \
+    ((AUDIO_DMA_TARGET_SAMPLES + AUDIO_CHUNK_SAMPLES - 1U) / AUDIO_CHUNK_SAMPLES)
+#define AUDIO_WINDOW_PERIOD_MS AUDIO_PERIOD_MS
+#define AUDIO_BASIC_FEATURE_HISTORY_CAPACITY 16U
+#ifndef AUDIO_ENABLE_WINDOW_DIAGNOSTICS
+#define AUDIO_ENABLE_WINDOW_DIAGNOSTICS 1U
+#endif
 /* Approximate 1 kHz host calibration offset; this is not a certified SPL meter. */
 #define AUDIO_SPL_CALIBRATION_OFFSET_DB 122.40
 #ifndef AUDIO_STORE_RAW_PCM
@@ -132,8 +153,21 @@ volatile uint32_t mcu_reset_csr_at_boot = 0U;
 #define NAND_FORCE_ERASE_ON_BOOT 0U
 #endif
 #ifndef NAND_FLUSH_COMPACT_RECORDS_EVERY_CYCLE
-#define NAND_FLUSH_COMPACT_RECORDS_EVERY_CYCLE 1U
+#define NAND_FLUSH_COMPACT_RECORDS_EVERY_CYCLE 0U
 #endif
+
+_Static_assert((1000U % IMU_ODR_HZ) == 0U,
+               "The host IMU period must be an integer number of milliseconds");
+_Static_assert(AUDIO_WINDOW_TARGET_SAMPLES == 48000U,
+               "Unexpected one-second PCM window length");
+_Static_assert(AUDIO_WARMUP_SAMPLES == 480U,
+               "Unexpected ten-millisecond warm-up length");
+_Static_assert(AUDIO_HARDWARE_WARMUP_SAMPLES <= 255U,
+               "MDF DiscardSamples supports at most 255 samples");
+_Static_assert(AUDIO_HARDWARE_WARMUP_SAMPLES <= AUDIO_WARMUP_SAMPLES,
+               "Hardware discard exceeds the total warm-up");
+_Static_assert(AUDIO_WINDOW_REQUIRED_CHUNKS == 48U,
+               "Unexpected number of DMA chunks per audio window");
 
 typedef struct
 {
@@ -280,6 +314,7 @@ MDF_DmaConfigTypeDef mic_dma_config;
 
 static volatile uint8_t microphone_active = 0U;
 static volatile uint8_t audio_accept_chunks = 0U;
+static uint32_t audio_software_warmup_remaining = 0U;
 volatile uint32_t audio_ring_head = 0U;
 volatile uint32_t audio_ring_tail = 0U;
 
@@ -392,6 +427,9 @@ static volatile uint8_t start_acquisition_requested = 0U;
 static volatile uint8_t stop_acquisition_requested = 0U;
 static volatile uint8_t download_requested = 0U;
 static volatile uint32_t sensor_tick_pending = 0U;
+static uint32_t acquisition_timebase_ms = 0U;
+static uint32_t imu_next_sample_tick_ms = 0U;
+static uint8_t imu_service_active = 0U;
 static volatile uint32_t user_button_last_event_ms = 0U;
 static volatile uint8_t user_button_pressed = 0U;
 static volatile uint8_t user_button_release_pending = 0U;
@@ -436,6 +474,11 @@ static uint8_t light_measurement_pending = 0U;
 static uint8_t light_exposure_state_valid = 0U;
 static LightExposureClass light_exposure_state = LIGHT_DARK;
 static uint32_t light_session_start_ms = 0U;
+static uint32_t light_measurement_sequence = 0U;
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+static uint32_t light_i2c_errors_before = 0U;
+static uint32_t light_smux_errors_before = 0U;
+#endif
 #if (LIGHT_STORE_RAW_LRAW != 0U)
 static uint32_t light_sample_index = 0U;
 #endif
@@ -451,6 +494,59 @@ volatile uint32_t light_measurements_failed = 0U;
 volatile uint32_t light_measurement_processing_last_ms = 0U;
 volatile uint32_t light_measurement_processing_max_ms = 0U;
 volatile LightFeatureDiagnostics light_feature_latest;
+
+volatile uint32_t acquisition_epoch_count = 0U;
+volatile uint32_t acquisition_epoch_start_tick = 0U;
+volatile uint32_t imu_samples_current_epoch = 0U;
+volatile uint32_t imu_samples_total = 0U;
+volatile uint32_t imu_missed_samples = 0U;
+volatile uint32_t imu_buffer_overrun_count = 0U;
+volatile uint32_t imu_effective_odr_hz = IMU_ODR_HZ;
+volatile uint32_t imu_hardware_odr_hz = IMU_HARDWARE_ODR_HZ;
+volatile uint32_t mic_window_count = 0U;
+volatile uint32_t mic_capture_samples = 0U;
+volatile uint32_t mic_valid_samples = 0U;
+volatile uint32_t mic_warmup_samples_discarded = 0U;
+volatile uint32_t mic_dma_half_count = 0U;
+volatile uint32_t mic_dma_full_count = 0U;
+volatile uint32_t mic_overrun_count = 0U;
+volatile uint32_t mic_last_window_duration_ms = 0U;
+volatile uint8_t mic_active = 0U;
+volatile uint32_t light_measurement_count = 0U;
+volatile uint32_t light_last_start_tick = 0U;
+volatile uint32_t light_last_complete_tick = 0U;
+volatile uint32_t light_error_count = 0U;
+volatile uint8_t light_active = 0U;
+volatile uint32_t afea_records_written = 0U;
+volatile uint32_t lfea_records_written = 0U;
+volatile uint32_t sens_records_written = 0U;
+volatile uint32_t nand_write_error_count = 0U;
+volatile uint32_t acquisition_deadline_miss_count = 0U;
+
+volatile uint32_t audio_diag_window_sequence = 0U;
+volatile uint32_t audio_diag_pcm_sample_rate_hz = AUDIO_SAMPLE_RATE_HZ;
+volatile uint32_t audio_diag_target_valid_samples = AUDIO_WINDOW_TARGET_SAMPLES;
+volatile uint32_t audio_diag_captured_samples = 0U;
+volatile uint32_t audio_diag_valid_samples = 0U;
+volatile uint32_t audio_diag_warmup_target_samples = AUDIO_WARMUP_SAMPLES;
+volatile uint32_t audio_diag_warmup_discarded_samples = 0U;
+volatile uint32_t audio_diag_dma_half_callbacks = 0U;
+volatile uint32_t audio_diag_dma_full_callbacks = 0U;
+volatile uint32_t audio_diag_stale_callbacks = 0U;
+volatile uint32_t audio_diag_ring_overflows = 0U;
+volatile uint32_t audio_diag_ring_max_occupancy = 0U;
+volatile int16_t audio_diag_first_valid_sample = 0;
+volatile int16_t audio_diag_last_valid_sample = 0;
+volatile uint32_t audio_diag_pcm_crc32 = 0U;
+volatile double audio_diag_rms_z_dbfs = 0.0;
+volatile double audio_diag_rms_a_dbfs = 0.0;
+volatile double audio_diag_peak_dbfs = 0.0;
+volatile double audio_diag_laeq_dba = 0.0;
+volatile uint8_t audio_diag_environment_class = AUDIO_ENV_UNAVAILABLE;
+volatile uint32_t audio_diag_mdf_start_count = 0U;
+volatile uint32_t audio_diag_mdf_stop_count = 0U;
+volatile uint32_t audio_diag_start_failures = 0U;
+volatile uint32_t audio_diag_stop_failures = 0U;
 
 /// ----- NAND FLASH variables ----- ///
 
@@ -483,12 +579,16 @@ static void MX_SPI3_Init(void);
 static void UpdateStateLed(AppState state);
 static LightExposureClass Light_ClassifyInitial(uint16_t clear_raw);
 static LightExposureClass Light_ClassifyWithHysteresis(uint16_t clear_raw);
-static LogStatus AcquireAndStoreLightMeasurement(void);
+static void LightMeasurement_Process(uint32_t now_ms);
+static void LightMeasurement_Finalize(uint8_t measurement_valid);
 static void AudioRing_Reset(void);
+static void MicrophoneClock_Enable(void);
+static void MicrophoneClock_Disable(void);
 static uint32_t AudioRing_Count(void);
 static void AudioRing_EnqueueFromIsr(const int16_t *samples);
 static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms);
 static LogStatus Audio_DrainQueuedChunks(uint32_t timestamp_ms);
+static uint32_t Audio_Crc32(const int16_t *samples, uint32_t sample_count);
 static AudioBasicFeatureDebug Audio_ComputeBasicFeatures(
         const int16_t *samples,
         uint32_t sample_count);
@@ -516,6 +616,8 @@ static void ProcessBleSync(uint32_t now_ms);
 static void UserButton_HandleShortPress(AppState pressed_state);
 static void UserButton_Process(uint32_t now_ms);
 static int SmartWearable_FactoryEraseNand(void);
+static void ProcessSensorTick(uint32_t sample_tick_ms);
+void App_ServiceTimeCriticalTasks(void);
 
 /* USER CODE END PFP */
 
@@ -679,7 +781,9 @@ static int SmartWearable_FactoryEraseNand(void)
             return -1;
         }
         microphone_active = 0U;
+        mic_active = 0U;
     }
+    MicrophoneClock_Disable();
 
     AudioRing_Reset();
     audio_window_pcm_samples = 0U;
@@ -724,6 +828,10 @@ static int SmartWearable_FactoryEraseNand(void)
     audio_scheduler_next_deadline_ms = audio_scheduler_first_deadline_ms;
     audio_scheduler_last_busy_interval_valid = 0U;
     acquisition_paused_for_ble_sync = 0U;
+    acquisition_timebase_ms = HAL_GetTick();
+    imu_next_sample_tick_ms = acquisition_timebase_ms + IMU_SAMPLE_PERIOD_MS;
+    sensor_tick_pending = 0U;
+    (void)HAL_TIM_Base_Start_IT(&htim2);
 
     factory_erase_duration_ms = HAL_GetTick() - erase_start_ms;
     factory_erase_completed_count++;
@@ -771,6 +879,16 @@ static void AudioScheduler_Init(void)
     audio_scheduler_last_busy_end_ms = 0U;
     audio_scheduler_last_busy_interval_valid = 0U;
     audio_scheduler_enabled = 1U;
+
+    acquisition_epoch_count = 0U;
+    acquisition_epoch_start_tick = now_ms;
+    acquisition_deadline_miss_count = 0U;
+    acquisition_timebase_ms = now_ms;
+    imu_next_sample_tick_ms = now_ms + IMU_SAMPLE_PERIOD_MS;
+    imu_samples_current_epoch = 0U;
+    imu_samples_total = 0U;
+    imu_missed_samples = 0U;
+    imu_buffer_overrun_count = 0U;
 
     light_measurement_pending = 0U;
     light_exposure_state_valid = 0U;
@@ -828,12 +946,16 @@ static void AudioScheduler_Process(uint32_t now_ms)
         (can_start != 0U) &&
         (deadline_was_busy == 0U))
     {
+        acquisition_epoch_start_tick = audio_scheduler_next_deadline_ms;
+        acquisition_epoch_count++;
+        imu_samples_current_epoch = 0U;
         start_acquisition_requested = 1U;
         start_request_count++;
     }
     else
     {
         audio_windows_missed += due_deadlines;
+        acquisition_deadline_miss_count += due_deadlines;
     }
 
     audio_scheduler_next_deadline_ms += due_deadlines * AUDIO_WINDOW_PERIOD_MS;
@@ -863,6 +985,7 @@ static void AudioScheduler_PauseForBleSync(void)
 {
     acquisition_paused_for_ble_sync = 1U;
     start_acquisition_requested = 0U;
+    sensor_tick_pending = 0U;
 }
 
 static void AudioScheduler_ResumeAfterBleSync(uint32_t now_ms)
@@ -879,6 +1002,8 @@ static void AudioScheduler_ResumeAfterBleSync(uint32_t now_ms)
     audio_scheduler_last_busy_interval_valid = 0U;
     acquisition_paused_for_ble_sync = 0U;
     start_acquisition_requested = 0U;
+    sensor_tick_pending = 0U;
+    imu_next_sample_tick_ms = now_ms + IMU_SAMPLE_PERIOD_MS;
 }
 
 static uint32_t AudioRing_CountFrom(uint32_t head, uint32_t tail)
@@ -913,6 +1038,10 @@ static void AudioRing_UpdateHighWatermark(uint32_t count)
     {
         mic_diag.audio_ring_high_watermark = count;
     }
+    if (count > audio_diag_ring_max_occupancy)
+    {
+        audio_diag_ring_max_occupancy = count;
+    }
 }
 
 static void AudioRing_EnqueueFromIsr(const int16_t *samples)
@@ -923,11 +1052,13 @@ static void AudioRing_EnqueueFromIsr(const int16_t *samples)
 
     if (current_state != STATE_ACQUISITION)
     {
+        audio_diag_stale_callbacks++;
         return;
     }
 
     if (audio_accept_chunks == 0U)
     {
+        audio_diag_stale_callbacks++;
         if (mic_diag.audio_window_target_reached != 0U)
         {
             mic_diag.audio_samples_discarded_beyond_window += AUDIO_CHUNK_SAMPLES;
@@ -952,6 +1083,8 @@ static void AudioRing_EnqueueFromIsr(const int16_t *samples)
         mic_diag.audio_ring_overflow_count++;
         mic_diag.audio_ring_overflow_samples += AUDIO_CHUNK_SAMPLES;
         mic_diag.buffer_drop_or_overwrite_count++;
+        mic_overrun_count++;
+        audio_diag_ring_overflows++;
         return;
     }
 
@@ -981,6 +1114,34 @@ static void AudioRing_EnqueueFromIsr(const int16_t *samples)
     }
 }
 
+static uint32_t Audio_Crc32(const int16_t *samples, uint32_t sample_count)
+{
+#if (AUDIO_ENABLE_WINDOW_DIAGNOSTICS != 0U)
+    const uint8_t *bytes = (const uint8_t *)samples;
+    uint32_t crc = 0xFFFFFFFFU;
+    uint32_t byte_count = sample_count * sizeof(int16_t);
+
+    for (uint32_t i = 0U; i < byte_count; i++)
+    {
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
+        crc ^= bytes[i];
+        for (uint32_t bit = 0U; bit < 8U; bit++)
+        {
+            uint32_t mask = 0U - (crc & 1U);
+            crc = (crc >> 1U) ^ (0xEDB88320U & mask);
+        }
+    }
+    return ~crc;
+#else
+    (void)samples;
+    (void)sample_count;
+    return 0U;
+#endif
+}
+
 static AudioBasicFeatureDebug Audio_ComputeBasicFeatures(
         const int16_t *samples,
         uint32_t sample_count)
@@ -1005,6 +1166,10 @@ static AudioBasicFeatureDebug Audio_ComputeBasicFeatures(
 
     for (uint32_t i = 0U; i < sample_count; i++)
     {
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
         sample_sum += samples[i];
     }
 
@@ -1015,6 +1180,11 @@ static AudioBasicFeatureDebug Audio_ComputeBasicFeatures(
         int32_t sample = samples[i];
         uint32_t magnitude = (sample < 0) ? (uint32_t)(-sample) : (uint32_t)sample;
         double centered = (double)sample - features.mean_counts;
+
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
 
         centered_energy += centered * centered;
 
@@ -1076,10 +1246,15 @@ static uint8_t Audio_ComputeAWeightedFeatures(
         return 0U;
     }
 
-    /* Each window is isolated by about 9.5 s, so all biquad states start at zero. */
+    /* Each one-second window is independent, so all biquad states start at zero. */
     for (uint32_t i = 0U; i < sample_count; i++)
     {
         double section_input = (double)samples[i] - mean_counts;
+
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
 
         for (uint32_t section = 0U; section < 3U; section++)
         {
@@ -1335,6 +1510,15 @@ static void Audio_PublishBasicFeatures(uint8_t window_complete,
              (features.valid != 0U) &&
              (features.a_weighting_valid != 0U)) ? 1U : 0U;
 
+    audio_diag_pcm_crc32 =
+            (features.sample_count == AUDIO_WINDOW_TARGET_SAMPLES) ?
+            Audio_Crc32(audio_window_pcm, features.sample_count) : 0U;
+    audio_diag_rms_z_dbfs = features.rms_zero_mean_dbfs;
+    audio_diag_rms_a_dbfs = features.a_weighted_rms_dbfs;
+    audio_diag_peak_dbfs = features.peak_dbfs;
+    audio_diag_laeq_dba = features.estimated_laeq_dba;
+    audio_diag_environment_class = features.environment_class;
+
     history_index = audio_basic_feature_history_write_index;
     audio_basic_feature_history[history_index] = features;
     audio_basic_feature_latest = features;
@@ -1373,7 +1557,12 @@ static void Audio_PublishBasicFeatures(uint8_t window_complete,
     if (NANDLogger_AppendAudioFeatureRecord(&nand_logger,
                                             &feature_record) != LOG_OK)
     {
+        nand_write_error_count++;
         LED_On(LED_RED);
+    }
+    else
+    {
+        afea_records_written++;
     }
 #endif
 }
@@ -1389,7 +1578,10 @@ static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
     uint32_t remaining_samples;
     uint32_t accepted_samples;
     uint32_t discarded_samples;
+    uint32_t skipped_samples;
+    uint32_t available_samples;
     uint32_t window_offset;
+    const int16_t *valid_samples;
 
 #if (AUDIO_STORE_RAW_PCM == 0U)
     (void)timestamp_ms;
@@ -1408,19 +1600,28 @@ static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
         next_tail = 0U;
     }
 
+    skipped_samples = (audio_software_warmup_remaining < AUDIO_CHUNK_SAMPLES) ?
+                      audio_software_warmup_remaining : AUDIO_CHUNK_SAMPLES;
+    audio_software_warmup_remaining -= skipped_samples;
+    mic_warmup_samples_discarded += skipped_samples;
+    audio_diag_warmup_discarded_samples += skipped_samples;
+
+    available_samples = AUDIO_CHUNK_SAMPLES - skipped_samples;
+    valid_samples = &audio_ring[tail].samples[skipped_samples];
+
     if (mic_diag.audio_window_samples_accepted < mic_diag.audio_window_target_samples)
     {
         remaining_samples = mic_diag.audio_window_target_samples -
                             mic_diag.audio_window_samples_accepted;
-        accepted_samples = (remaining_samples < AUDIO_CHUNK_SAMPLES) ?
-                           remaining_samples : AUDIO_CHUNK_SAMPLES;
+        accepted_samples = (remaining_samples < available_samples) ?
+                           remaining_samples : available_samples;
     }
     else
     {
         accepted_samples = 0U;
     }
 
-    discarded_samples = AUDIO_CHUNK_SAMPLES - accepted_samples;
+    discarded_samples = available_samples - accepted_samples;
 
     if (accepted_samples > 0U)
     {
@@ -1432,11 +1633,19 @@ static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
         }
 
         memcpy(&audio_window_pcm[window_offset],
-               audio_ring[tail].samples,
+               valid_samples,
                accepted_samples * sizeof(int16_t));
+
+        if (window_offset == 0U)
+        {
+            audio_diag_first_valid_sample = valid_samples[0];
+        }
+        audio_diag_last_valid_sample = valid_samples[accepted_samples - 1U];
 
         mic_diag.audio_window_samples_accepted += accepted_samples;
         audio_window_pcm_samples = window_offset + accepted_samples;
+        mic_valid_samples = audio_window_pcm_samples;
+        audio_diag_valid_samples = audio_window_pcm_samples;
 
 #if (AUDIO_STORE_RAW_PCM != 0U)
         mic_diag.nand_append_attempt_count++;
@@ -1444,7 +1653,7 @@ static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
 
         append_status = NANDLogger_AppendAudioBuffer(
                 &nand_logger,
-                audio_ring[tail].samples,
+                valid_samples,
                 accepted_samples,
                 timestamp_ms);
 
@@ -1641,8 +1850,12 @@ void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
     }
 
     mic_diag.dma_half_complete_count++;
+    mic_dma_half_count++;
+    audio_diag_dma_half_callbacks++;
     mic_diag.dma_complete_count++;
     mic_diag.audio_dma_samples_produced += AUDIO_CHUNK_SAMPLES;
+    mic_capture_samples += AUDIO_CHUNK_SAMPLES;
+    audio_diag_captured_samples += AUDIO_CHUNK_SAMPLES;
     mic_diag.last_dma_complete_tick_ms = HAL_GetTick();
 
     AudioRing_EnqueueFromIsr(&audio_dma_buffer[0]);
@@ -1656,8 +1869,12 @@ void HAL_MDF_AcqCpltCallback(MDF_HandleTypeDef *hmdf)
     }
 
     mic_diag.dma_full_complete_count++;
+    mic_dma_full_count++;
+    audio_diag_dma_full_callbacks++;
     mic_diag.dma_complete_count++;
     mic_diag.audio_dma_samples_produced += AUDIO_CHUNK_SAMPLES;
+    mic_capture_samples += AUDIO_CHUNK_SAMPLES;
+    audio_diag_captured_samples += AUDIO_CHUNK_SAMPLES;
     mic_diag.last_dma_complete_tick_ms = HAL_GetTick();
 
     AudioRing_EnqueueFromIsr(&audio_dma_buffer[AUDIO_CHUNK_SAMPLES]);
@@ -1671,18 +1888,16 @@ void HAL_MDF_ErrorCallback(MDF_HandleTypeDef *hmdf)
     }
 
     mic_diag.dma_error_callback_count++;
+    mic_overrun_count++;
     MicDiagnostics_UpdateErrorCodes();
 }
 /* USER CODE END 0 */
 static void StopAcquisition(void)
 {
     uint32_t stop_ms = HAL_GetTick();
-    LogStatus flush_status;
     LogStatus drain_status;
     HAL_StatusTypeDef stop_status;
     uint8_t window_complete;
-
-    HAL_TIM_Base_Stop_IT(&htim2);
 
     mic_diag.session_stop_tick_ms = stop_ms;
     audio_accept_chunks = 0U;
@@ -1699,20 +1914,26 @@ static void StopAcquisition(void)
             mic_diag.mdf_stop_ok_count++;
             mic_diag.dma_session_stop_ok_count++;
             mic_diag.final_partial_chunk_discarded_count++;
+            audio_diag_mdf_stop_count++;
         }
         else
         {
             mic_diag.mdf_stop_error_count++;
             mic_diag.dma_session_stop_error_count++;
+            audio_diag_stop_failures++;
         }
 
         microphone_active = 0U;
+        mic_active = 0U;
     }
+
+    MicrophoneClock_Disable();
 
     mic_diag.audio_ring_count_at_stop = AudioRing_Count();
     drain_status = Audio_DrainQueuedChunks(stop_ms);
     if (drain_status != LOG_OK)
     {
+        nand_write_error_count++;
         LED_On(LED_RED);
     }
 
@@ -1731,32 +1952,14 @@ static void StopAcquisition(void)
         window_complete = 0U;
     }
 
-    if (light_measurement_pending != 0U)
-    {
-        light_measurement_pending = 0U;
-        if ((storage_full_latched == 0U) &&
-            (AcquireAndStoreLightMeasurement() != LOG_OK))
-        {
-            LED_On(LED_RED);
-        }
-    }
+    mic_valid_samples = mic_diag.audio_window_samples_accepted;
+    mic_last_window_duration_ms = stop_ms - mic_diag.last_dma_start_tick_ms;
 
     Audio_PublishBasicFeatures(window_complete, drain_status);
 
-    sensor_tick_pending = 0U;
     stop_acquisition_requested = 0U;
 
     current_state = STATE_IDLE;
-
-#if (NAND_FLUSH_COMPACT_RECORDS_EVERY_CYCLE != 0U)
-    flush_status = NANDLogger_FlushAll(&nand_logger, stop_ms);
-#else
-    flush_status = NANDLogger_FlushWindowData(&nand_logger, stop_ms);
-#endif
-    if (flush_status != LOG_OK)
-    {
-        LED_On(LED_RED);
-    }
 
     UpdateStateLed(current_state);
 
@@ -1838,22 +2041,14 @@ static LightExposureClass Light_ClassifyWithHysteresis(uint16_t clear_raw)
     return classification;
 }
 
-static LogStatus AcquireAndStoreLightMeasurement(void)
+static void LightMeasurement_Finalize(uint8_t measurement_valid)
 {
     LightFeatureRecordV1 feature_record = {0};
     LightFeatureDiagnostics latest = {0};
-    LogStatus storage_status = LOG_OK;
-    uint32_t processing_start_ms = HAL_GetTick();
-    uint8_t measurement_valid = 0U;
     uint8_t previous_exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
-#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
-    uint32_t i2c_errors_before = as7341_diag_i2c_error_count;
-    uint32_t smux_errors_before = as7341_diag_smux_timeout_count;
-#endif
 
-    light_measurements_started++;
-    light_samples_requested++;
-    feature_record.window_sequence = current_window_sequence;
+    feature_record.window_sequence = light_measurement_sequence;
+    feature_record.sample_timestamp_ms = light_last_start_tick;
     feature_record.exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
 
     if (light_exposure_state_valid != 0U)
@@ -1861,9 +2056,7 @@ static LogStatus AcquireAndStoreLightMeasurement(void)
         previous_exposure_class = (uint8_t)light_exposure_state;
     }
 
-    memset(&light_spectrum, 0, sizeof(light_spectrum));
-    if ((as7341_available != 0U) &&
-        (AS7341_ReadFullSpectrum(&light_spectrum) == 1U))
+    if (measurement_valid != 0U)
     {
         LightExposureClass classification;
 
@@ -1877,18 +2070,10 @@ static LogStatus AcquireAndStoreLightMeasurement(void)
         feature_record.f8 = light_spectrum.ch[7];
         feature_record.clear = light_spectrum.ch[8];
         feature_record.nir = light_spectrum.ch[9];
-        feature_record.sample_timestamp_ms = HAL_GetTick();
 
-        if (light_exposure_state_valid == 0U)
-        {
-            classification = Light_ClassifyInitial(feature_record.clear);
-        }
-        else
-        {
-            classification =
-                    Light_ClassifyWithHysteresis(feature_record.clear);
-        }
-
+        classification = (light_exposure_state_valid == 0U) ?
+                Light_ClassifyInitial(feature_record.clear) :
+                Light_ClassifyWithHysteresis(feature_record.clear);
         if (feature_record.clear >= LIGHT_SATURATION_CLEAR_COUNTS)
         {
             classification = LIGHT_VERY_HIGH_EXPOSURE;
@@ -1901,15 +2086,12 @@ static LogStatus AcquireAndStoreLightMeasurement(void)
         feature_record.flags |= LIGHT_FLAG_COMPLETE |
                                 LIGHT_FLAG_ACQUISITION_VALID |
                                 LIGHT_FLAG_CLASSIFICATION_VALID;
-        measurement_valid = 1U;
         light_measurements_completed++;
         light_samples_acquired++;
 
 #if (LIGHT_STORE_RAW_LRAW != 0U)
         {
-            LightRawSampleRecord raw_record;
-            LogStatus raw_status;
-
+            LightRawSampleRecord raw_record = {0};
             raw_record.sample_elapsed_ms =
                     feature_record.sample_timestamp_ms - light_session_start_ms;
             raw_record.sample_index = light_sample_index;
@@ -1923,12 +2105,8 @@ static LogStatus AcquireAndStoreLightMeasurement(void)
             raw_record.f8_counts = feature_record.f8;
             raw_record.clear_counts = feature_record.clear;
             raw_record.nir_counts = feature_record.nir;
-
-            raw_status = NANDLogger_AppendLightRawRecord(
-                    &nand_logger,
-                    &raw_record,
-                    feature_record.sample_timestamp_ms);
-            if (raw_status == LOG_OK)
+            if (NANDLogger_AppendLightRawRecord(&nand_logger, &raw_record,
+                                                feature_record.sample_timestamp_ms) == LOG_OK)
             {
                 light_sample_index++;
                 light_samples_saved++;
@@ -1936,41 +2114,34 @@ static LogStatus AcquireAndStoreLightMeasurement(void)
             else
             {
                 light_samples_discarded++;
-                storage_status = raw_status;
+                nand_write_error_count++;
             }
         }
 #endif
     }
     else
     {
-        feature_record.sample_timestamp_ms = HAL_GetTick();
         light_measurements_failed++;
         light_samples_discarded++;
-        LED_On(LED_RED);
-
+        light_error_count++;
 #if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
-        if (as7341_diag_i2c_error_count != i2c_errors_before)
-        {
+        if (as7341_diag_i2c_error_count != light_i2c_errors_before)
             feature_record.flags |= LIGHT_FLAG_I2C_ERROR;
-        }
-        if (as7341_diag_smux_timeout_count != smux_errors_before)
-        {
+        if (as7341_diag_smux_timeout_count != light_smux_errors_before)
             feature_record.flags |= LIGHT_FLAG_SMUX_ERROR;
-        }
 #endif
+        LED_On(LED_RED);
     }
 
 #if (LIGHT_STORE_FEATURE_RECORD != 0U)
     light_feature_records_generated++;
+    if (NANDLogger_AppendLightFeatureRecord(&nand_logger, &feature_record) == LOG_OK)
     {
-        LogStatus feature_status = NANDLogger_AppendLightFeatureRecord(
-                &nand_logger,
-                &feature_record);
-
-        if (feature_status != LOG_OK)
-        {
-            storage_status = feature_status;
-        }
+        lfea_records_written++;
+    }
+    else
+    {
+        nand_write_error_count++;
     }
 #endif
 
@@ -1992,33 +2163,83 @@ static LogStatus AcquireAndStoreLightMeasurement(void)
     latest.complete = ((feature_record.flags & LIGHT_FLAG_COMPLETE) != 0U) ? 1U : 0U;
     latest.acquisition_valid = measurement_valid;
     latest.classification_valid =
-            ((feature_record.flags & LIGHT_FLAG_CLASSIFICATION_VALID) != 0U) ?
-            1U : 0U;
+            ((feature_record.flags & LIGHT_FLAG_CLASSIFICATION_VALID) != 0U) ? 1U : 0U;
     latest.saturated =
             ((feature_record.flags & LIGHT_FLAG_SATURATED) != 0U) ? 1U : 0U;
     light_feature_latest = latest;
 
-    light_measurement_processing_last_ms = HAL_GetTick() - processing_start_ms;
-    if (light_measurement_processing_last_ms >
-        light_measurement_processing_max_ms)
-    {
-        light_measurement_processing_max_ms =
-                light_measurement_processing_last_ms;
-    }
-
-    return storage_status;
+    light_last_complete_tick = HAL_GetTick();
+    light_measurement_processing_last_ms =
+            light_last_complete_tick - light_last_start_tick;
+    if (light_measurement_processing_last_ms > light_measurement_processing_max_ms)
+        light_measurement_processing_max_ms = light_measurement_processing_last_ms;
+    light_active = 0U;
 }
 
-static void ProcessSensorTick(void)
+static void MicrophoneClock_Enable(void)
+{
+    MDF1->CKGCR |= MDF_CKGCR_CKDEN;
+    MdfHandle0.Instance->SITFCR |= MDF_SITFCR_SITFEN;
+}
+
+static void MicrophoneClock_Disable(void)
+{
+    MdfHandle0.Instance->SITFCR &= ~MDF_SITFCR_SITFEN;
+    MDF1->CKGCR &= ~MDF_CKGCR_CKDEN;
+}
+
+static void LightMeasurement_Process(uint32_t now_ms)
+{
+    AS7341_AsyncResult result;
+
+    if (light_active == 0U)
+    {
+        if (light_measurement_pending == 0U)
+            return;
+
+        light_measurement_pending = 0U;
+        light_measurement_sequence = current_window_sequence;
+        light_last_start_tick = now_ms;
+        light_measurement_count++;
+        light_measurements_started++;
+        light_samples_requested++;
+        memset(&light_spectrum, 0, sizeof(light_spectrum));
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+        light_i2c_errors_before = as7341_diag_i2c_error_count;
+        light_smux_errors_before = as7341_diag_smux_timeout_count;
+#endif
+        light_active = 1U;
+
+        if ((as7341_available == 0U) ||
+            (AS7341_StartFullSpectrumAsync(&light_spectrum) == 0U))
+        {
+            LightMeasurement_Finalize(0U);
+            return;
+        }
+    }
+
+    result = AS7341_ProcessFullSpectrumAsync(now_ms);
+    if (result == AS7341_ASYNC_COMPLETE)
+        LightMeasurement_Finalize(1U);
+    else if (result == AS7341_ASYNC_ERROR)
+        LightMeasurement_Finalize(0U);
+}
+
+static void ProcessSensorTick(uint32_t sample_tick_ms)
 {
     uint32_t elapsed_ms;
 
-    /* --- Read IMU --- */
-    IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
-    IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
+    if (IMU_ReadCombinedData(&accelerometer_data,
+                             &gyroscope_data,
+                             raw_accelerometer,
+                             raw_gyroscope) == 0U)
+    {
+        imu_missed_samples++;
+        return;
+    }
 
-    /* --- Timestamp from real elapsed session time, shared with light samples --- */
-    elapsed_ms = HAL_GetTick() - light_session_start_ms;
+    /* Host records form an explicit 100 Hz nearest-sample stream from 104 Hz hardware ODR. */
+    elapsed_ms = sample_tick_ms - acquisition_timebase_ms;
     timestamp = Time_FromElapsedMilliseconds(elapsed_ms);
     tim++;
 
@@ -2029,9 +2250,54 @@ static void ProcessSensorTick(void)
                                       raw_gyroscope,
                                       raw_light) != LOG_OK)
     {
-        StopAcquisition();
+        nand_write_error_count++;
+        nand_storage_full = 1U;
+        storage_full_latched = 1U;
+        if (microphone_active != 0U)
+            stop_acquisition_requested = 1U;
         LED_On(LED_RED);
     }
+    else
+    {
+        imu_samples_current_epoch++;
+        imu_samples_total++;
+        sens_records_written++;
+    }
+}
+
+void App_ServiceTimeCriticalTasks(void)
+{
+    uint32_t pending;
+    uint32_t sample_tick_ms;
+    uint32_t primask;
+
+    if (imu_service_active != 0U)
+        return;
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    pending = sensor_tick_pending;
+    if (pending != 0U)
+        sensor_tick_pending = 0U;
+    if (primask == 0U)
+        __enable_irq();
+
+    if (pending == 0U)
+        return;
+
+    if (pending > 1U)
+    {
+        uint32_t lost = pending - 1U;
+        imu_missed_samples += lost;
+        imu_buffer_overrun_count++;
+        imu_next_sample_tick_ms += lost * IMU_SAMPLE_PERIOD_MS;
+    }
+
+    sample_tick_ms = imu_next_sample_tick_ms;
+    imu_next_sample_tick_ms += IMU_SAMPLE_PERIOD_MS;
+    imu_service_active = 1U;
+    ProcessSensorTick(sample_tick_ms);
+    imu_service_active = 0U;
 }
 
 static void ProcessBleSync(uint32_t now_ms)
@@ -2261,8 +2527,12 @@ MX_SPI3_Init();
 
 
   if(IMU_Init() == 1) {
-    IMU_ConfigAccelerometer(ACC_ODR_52HZ, ACC_FS_2G, 1);
-    IMU_ConfigGyroscope(GYR_ODR_52HZ, GYR_FS_250DPS, 1);
+    IMU_ConfigAccelerometer(ACC_ODR_104HZ, ACC_FS_2G, 1);
+    IMU_ConfigGyroscope(GYR_ODR_104HZ, GYR_FS_250DPS, 1);
+    if (IMU_EnableCoherentReads() == 0U)
+    {
+      Error_Handler();
+    }
   } else {
     LED_Toggle(LED_RED); HAL_Delay(500);
     LED_Toggle(LED_RED); HAL_Delay(500);
@@ -2293,11 +2563,17 @@ MX_SPI3_Init();
     LED_Off(LED_RED);
   }
   AudioScheduler_Init();
+  light_session_start_ms = acquisition_timebase_ms;
+  if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
   mic_dma_config.Address    = (uint32_t)audio_dma_buffer;
   mic_dma_config.DataLength = AUDIO_DMA_BUFFER_SAMPLES * sizeof(int16_t);
   mic_dma_config.MsbOnly    = ENABLE;
+  MicrophoneClock_Disable();
   
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -2321,6 +2597,8 @@ MX_SPI3_Init();
 
     ProcessBleSync(main_loop_now_ms);
     AudioScheduler_Process(main_loop_now_ms);
+    App_ServiceTimeCriticalTasks();
+    LightMeasurement_Process(HAL_GetTick());
     UpdateStateLed(current_state);
 
 	  switch(current_state)
@@ -2345,6 +2623,31 @@ MX_SPI3_Init();
           memset((void *)&mic_diag, 0, sizeof(mic_diag));
           mic_diag.audio_window_target_samples = AUDIO_WINDOW_TARGET_SAMPLES;
           mic_diag.session_start_tick_ms = HAL_GetTick();
+          audio_software_warmup_remaining = AUDIO_SOFTWARE_WARMUP_SAMPLES;
+          audio_diag_window_sequence = next_window_sequence;
+          audio_diag_pcm_sample_rate_hz = AUDIO_SAMPLE_RATE_HZ;
+          audio_diag_target_valid_samples = AUDIO_WINDOW_TARGET_SAMPLES;
+          audio_diag_captured_samples = AUDIO_HARDWARE_WARMUP_SAMPLES;
+          audio_diag_valid_samples = 0U;
+          audio_diag_warmup_target_samples = AUDIO_WARMUP_SAMPLES;
+          audio_diag_warmup_discarded_samples = AUDIO_HARDWARE_WARMUP_SAMPLES;
+          audio_diag_dma_half_callbacks = 0U;
+          audio_diag_dma_full_callbacks = 0U;
+          audio_diag_stale_callbacks = 0U;
+          audio_diag_ring_overflows = 0U;
+          audio_diag_ring_max_occupancy = 0U;
+          audio_diag_first_valid_sample = 0;
+          audio_diag_last_valid_sample = 0;
+          audio_diag_pcm_crc32 = 0U;
+          audio_diag_rms_z_dbfs = 0.0;
+          audio_diag_rms_a_dbfs = 0.0;
+          audio_diag_peak_dbfs = 0.0;
+          audio_diag_laeq_dba = 0.0;
+          audio_diag_environment_class = AUDIO_ENV_UNAVAILABLE;
+          audio_diag_mdf_start_count = 0U;
+          audio_diag_mdf_stop_count = 0U;
+          audio_diag_start_failures = 0U;
+          audio_diag_stop_failures = 0U;
 
           timestamp.hh = 0U;
           timestamp.mm = 0U;
@@ -2352,21 +2655,19 @@ MX_SPI3_Init();
           timestamp.sss = 0U;
 
           tim = 0U;
-          sensor_tick_pending = 0U;
           memset(raw_light, 0, sizeof(raw_light));
           light_measurement_pending = 0U;
-          light_session_start_ms = HAL_GetTick();
 #if (LIGHT_STORE_RAW_LRAW != 0U)
-          light_sample_index = 0U;
+          (void)light_sample_index;
 #endif
-          light_samples_requested = 0U;
-          light_samples_acquired = 0U;
-          light_samples_saved = 0U;
-          light_samples_discarded = 0U;
 
           audio_window_pcm_samples = 0U;
           AudioRing_Reset();
           microphone_active = 0U;
+          mic_active = 0U;
+          mic_capture_samples = AUDIO_HARDWARE_WARMUP_SAMPLES;
+          mic_valid_samples = 0U;
+          mic_warmup_samples_discarded = AUDIO_HARDWARE_WARMUP_SAMPLES;
           stop_acquisition_requested = 0U;
           current_state = STATE_ACQUISITION;
           UpdateStateLed(current_state);
@@ -2375,6 +2676,7 @@ MX_SPI3_Init();
           mic_dma_config.DataLength = AUDIO_DMA_BUFFER_SAMPLES * sizeof(int16_t);
           mic_dma_config.MsbOnly    = ENABLE;
 
+          MicrophoneClock_Enable();
           audio_accept_chunks = 1U;
           mic_diag.dma_start_attempt_count++;
           mic_diag.last_dma_start_tick_ms = HAL_GetTick();
@@ -2390,26 +2692,29 @@ MX_SPI3_Init();
           {
             mic_diag.dma_start_ok_count++;
             mic_diag.dma_session_start_ok_count++;
+            audio_diag_mdf_start_count++;
             microphone_active = 1U;
+            mic_active = 1U;
+            mic_window_count++;
             current_window_sequence = next_window_sequence;
+            audio_diag_window_sequence = current_window_sequence;
             next_window_sequence++;
-            AudioScheduler_RecordWindowStart(mic_diag.last_dma_start_tick_ms);
+            AudioScheduler_RecordWindowStart(
+                    mic_diag.last_dma_start_tick_ms + AUDIO_WARMUP_MS);
             light_measurement_pending = 1U;
             light_measurements_requested++;
-            HAL_TIM_Base_Start_IT(&htim2);
           }
           else
           {
             audio_accept_chunks = 0U;
             mic_diag.dma_start_error_count++;
             mic_diag.dma_session_start_error_count++;
+            audio_diag_start_failures++;
             Error_Handler();
           }
 
           break;
         }
-
-        HAL_TIM_Base_Stop_IT(&htim2);
 
         if (microphone_active)
         {
@@ -2429,8 +2734,11 @@ MX_SPI3_Init();
             mic_diag.mdf_stop_error_count++;
           }
 
-          microphone_active = 0U;
-        }
+        microphone_active = 0U;
+        mic_active = 0U;
+    }
+
+    MicrophoneClock_Disable();
 
         audio_accept_chunks = 0U;
 
@@ -2450,12 +2758,13 @@ MX_SPI3_Init();
               break;
           }
 
-          if ((sensor_tick_pending > 0U) &&
-                  (current_state == STATE_ACQUISITION) &&
-                  (stop_acquisition_requested == 0U))
+          App_ServiceTimeCriticalTasks();
+
+          if (Audio_DrainQueuedChunks(HAL_GetTick()) != LOG_OK)
           {
-            sensor_tick_pending--;
-             ProcessSensorTick();
+            nand_write_error_count++;
+            stop_acquisition_requested = 1U;
+            LED_On(LED_RED);
           }
 
           if (stop_acquisition_requested)
@@ -2510,12 +2819,23 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         return;
     }
 
-    if (current_state != STATE_ACQUISITION)
+    if ((audio_scheduler_enabled == 0U) ||
+        (acquisition_paused_for_ble_sync != 0U) ||
+        (factory_erase_in_progress != 0U) ||
+        (usb_flag != 0U))
     {
         return;
     }
 
-    sensor_tick_pending++;
+    if (sensor_tick_pending == UINT32_MAX)
+    {
+        imu_buffer_overrun_count++;
+        imu_missed_samples++;
+    }
+    else
+    {
+        sensor_tick_pending++;
+    }
 }
 
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
@@ -2766,7 +3086,7 @@ static void MX_MDF1_Init(void)
   MdfFilterConfig0.SoundActivity.Activation = DISABLE;
   MdfFilterConfig0.AcquisitionMode = MDF_MODE_ASYNC_CONT;
   MdfFilterConfig0.FifoThreshold = MDF_FIFO_THRESHOLD_NOT_EMPTY;
-  MdfFilterConfig0.DiscardSamples = 255;
+  MdfFilterConfig0.DiscardSamples = AUDIO_HARDWARE_WARMUP_SAMPLES;
   MdfFilterConfig0.Trigger.Source = MDF_CLOCK_TRIG_TRGO;
   MdfFilterConfig0.Trigger.Edge = MDF_FILTER_TRIG_RISING_EDGE;
   /* USER CODE BEGIN MDF1_Init 2 */

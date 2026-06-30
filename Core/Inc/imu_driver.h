@@ -29,10 +29,13 @@
 #define IMU_ACC_CTRL6_REG       0x15 // Control register for accelerometer performance mode
 #define IMU_GYR_CTRL7_REG       0x16 // Control register for gyroscope performance mode
 #define IMU_CTRL10_REG          0x19 // Main control register
+#define IMU_CTRL3_REG           0x12 // BDU and register auto-increment
 
 // Output Data Registers for Accelerometer and Gyroscope (contiguous)
 #define IMU_GYR_OUT_X_L_REG     0x22 // Gyroscope X-axis LSB
 #define IMU_ACC_OUT_X_L_REG     0x28 // Accelerometer X-axis LSB
+#define IMU_CTRL3_BDU           (1U << 6)
+#define IMU_CTRL3_IF_INC        (1U << 2)
 
 // --- Register Configuration Values ---
 // These preprocessor macros define the values for configuring ODR, Full Scale, and performance modes.
@@ -101,6 +104,15 @@ void IMU_ConfigAccelerometer(uint8_t odr, uint8_t scale, uint8_t high_performanc
  * @param high_performance_mode 1 to enable high performance mode, 0 for low power.
  */
 void IMU_ConfigGyroscope(uint8_t odr, uint8_t scale, uint8_t high_performance_mode);
+
+/** Enable coherent multi-byte reads and register auto-increment. */
+uint8_t IMU_EnableCoherentReads(void);
+
+/** Read one coherent gyroscope+accelerometer pair in a single I2C burst. */
+uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
+                             IMU_Data *gyro_data,
+                             uint8_t *raw_accelerometer,
+                             uint8_t *raw_gyroscope);
 
 /**
  * @brief Reads the raw and converted accelerometer data.
