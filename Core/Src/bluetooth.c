@@ -29,6 +29,16 @@ extern UART_HandleTypeDef huart3;
 
 static void enter_command_mode(void);
 static void exit_command_mode(void);
+static int ble_wait_for_token(const char *token, uint32_t timeout_ms);
+
+volatile uint32_t ble_lp_wake_count = 0U;
+volatile uint32_t ble_lp_release_count = 0U;
+volatile uint32_t ble_lp_config_success_count = 0U;
+volatile uint32_t ble_lp_config_error_count = 0U;
+volatile uint32_t ble_lp_last_wake_ms = 0U;
+volatile uint32_t ble_lp_last_release_ms = 0U;
+volatile uint8_t ble_uart_awake = 1U;
+volatile uint8_t ble_lp_configured = 0U;
 
 // --- Public Function Implementations ---
 
@@ -55,6 +65,13 @@ void BLE_HardReset(void) {
 void BLE_Initialize(void) {
     uint8_t reboot_response[9] = {0};
     uint8_t command_ok_response[100] = {0};
+    int low_power_status;
+
+    /* Keep UART_RX_IND asserted throughout module configuration. */
+    HAL_GPIO_WritePin(BLE_UART_RX_IND_GPIO_Port, BLE_UART_RX_IND_Pin,
+                      GPIO_PIN_RESET);
+    ble_uart_awake = 1U;
+    ble_lp_configured = 0U;
 
     // Perform a hard reset to get the module into a known state
     BLE_HardReset();
@@ -78,6 +95,9 @@ void BLE_Initialize(void) {
     BLE_SendData(enable_uart_rx_ind, sizeof(enable_uart_rx_ind) - 1);
     HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
 
+    /* Configure automatic low-power operation before applying settings. */
+    low_power_status = BLE_ConfigureLowPower();
+
     // Reboot the module for the new settings to take effect
     uint8_t reboot_command[] = "R,1\r";
     BLE_SendData(reboot_command, sizeof(reboot_command) - 1);
@@ -85,6 +105,58 @@ void BLE_Initialize(void) {
 
     // Exit Command Mode and return to Data Mode
     exit_command_mode();
+
+    if (low_power_status == 0) {
+        BLE_ReleaseUartForLowPower();
+    }
+}
+
+int BLE_ConfigureLowPower(void) {
+    static const uint8_t low_power_command[] = "SO,1\r";
+
+    if (HAL_UART_Transmit(&huart3,
+                          (uint8_t *)low_power_command,
+                          sizeof(low_power_command) - 1U,
+                          UART_TIMEOUT) != HAL_OK) {
+        ble_lp_configured = 0U;
+        ble_lp_config_error_count++;
+        return -1;
+    }
+
+    if (ble_wait_for_token("AOK", UART_TIMEOUT) != 0) {
+        ble_lp_configured = 0U;
+        ble_lp_config_error_count++;
+        return -1;
+    }
+
+    ble_lp_configured = 1U;
+    ble_lp_config_success_count++;
+    return 0;
+}
+
+void BLE_WakeUart(void) {
+    if (ble_uart_awake != 0U) {
+        return;
+    }
+
+    HAL_GPIO_WritePin(BLE_UART_RX_IND_GPIO_Port, BLE_UART_RX_IND_Pin,
+                      GPIO_PIN_RESET);
+    HAL_Delay(5U);
+    ble_uart_awake = 1U;
+    ble_lp_last_wake_ms = HAL_GetTick();
+    ble_lp_wake_count++;
+}
+
+void BLE_ReleaseUartForLowPower(void) {
+    if ((ble_lp_configured == 0U) || (ble_uart_awake == 0U)) {
+        return;
+    }
+
+    HAL_GPIO_WritePin(BLE_UART_RX_IND_GPIO_Port, BLE_UART_RX_IND_Pin,
+                      GPIO_PIN_SET);
+    ble_uart_awake = 0U;
+    ble_lp_last_release_ms = HAL_GetTick();
+    ble_lp_release_count++;
 }
 
 /**
@@ -244,49 +316,6 @@ void BLE_ReceiveData(uint8_t* data, uint8_t data_length) {
     HAL_UART_Receive(&huart3, data, data_length, UART_TIMEOUT);
 }
 
-/**
- * @brief Sends a structured data packet with a specific type and value.
- *
- * This function creates a standardized packet format to send specific sensor data.
- * The packet format is: { | Type | MSB of Value | ... | LSB of Value | ... | }
- * @param type The type of data being sent (e.g., acceleration, gyroscope).
- * @param value The 32-bit value to be sent.
- */
-void BLE_SendPacket(BLE_DataType ble_data_type, uint8_t* data_buffer) {
-    uint8_t ble_packet[PACKET_LENGTH];
-
-    // Initialize the packet buffer
-    ble_packet[0] = '{';
-    ble_packet[PACKET_LENGTH - 1] = '}';
-    for (uint8_t i = 1; i < PACKET_LENGTH - 1; i++) {
-        ble_packet[i] = 0;
-    }
-
-    // Byte 1: Data type identifier
-    switch (ble_data_type) {
-        case DATA_TYPE_IMU_ACCELERATION:
-            ble_packet[1] = 'A';
-            break;
-        case DATA_TYPE_IMU_GYROSCOPE:
-            ble_packet[1] = 'G';
-            break;
-        default:
-            ble_packet[1] = 'U'; // Unknown data type
-            break;
-    }
-
-    // Bytes 2-4: The 32-bit value, packed in big-endian format
-    ble_packet[2] = data_buffer[0]; // X Axis LSB
-    ble_packet[3] = data_buffer[1]; // X Axis MSB
-    ble_packet[4] = data_buffer[2]; // Y Axis LSB
-    ble_packet[5] = data_buffer[3]; // Y Axis MSB
-    ble_packet[6] = data_buffer[4]; // Z Axis LSB
-    ble_packet[7] = data_buffer[5]; // Z Axis MSB
-
-    // Send the complete packet over UART
-    BLE_SendData(ble_packet, sizeof(ble_packet));
-}
-
 // --- Helper Function Implementations ---
 // These helper functions encapsulate common, repeated tasks to improve code clarity.
 
@@ -314,4 +343,33 @@ static void exit_command_mode(void) {
     BLE_SendData(data_mode_command, sizeof(data_mode_command) - 1);
     //HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
     HAL_Delay(100);
+}
+
+static int ble_wait_for_token(const char *token, uint32_t timeout_ms) {
+    uint32_t start_ms = HAL_GetTick();
+    uint32_t matched = 0U;
+
+    if ((token == NULL) || (token[0] == '\0')) {
+        return -1;
+    }
+
+    while ((HAL_GetTick() - start_ms) < timeout_ms) {
+        uint8_t byte;
+        HAL_StatusTypeDef status = HAL_UART_Receive(&huart3, &byte, 1U, 10U);
+
+        if (status == HAL_OK) {
+            if (byte == (uint8_t)token[matched]) {
+                matched++;
+                if (token[matched] == '\0') {
+                    return 0;
+                }
+            } else {
+                matched = (byte == (uint8_t)token[0]) ? 1U : 0U;
+            }
+        } else if (status != HAL_TIMEOUT) {
+            return -1;
+        }
+    }
+
+    return -1;
 }

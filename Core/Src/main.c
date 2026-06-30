@@ -78,6 +78,8 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* USER CODE BEGIN PV */
 
+volatile uint32_t mcu_reset_csr_at_boot = 0U;
+
 //--- Microphone acquisition variables ---
 #define AUDIO_CHUNK_SAMPLES 1024U
 #define AUDIO_DMA_BUFFER_SAMPLES (2U * AUDIO_CHUNK_SAMPLES)
@@ -2015,10 +2017,6 @@ static void ProcessSensorTick(void)
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
     IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
 
-    /* --- BLE transmission --- */
-    BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
-    BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
-
     /* --- Timestamp from real elapsed session time, shared with light samples --- */
     elapsed_ms = HAL_GetTick() - light_session_start_ms;
     timestamp = Time_FromElapsedMilliseconds(elapsed_ms);
@@ -2107,6 +2105,8 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+
+  mcu_reset_csr_at_boot = RCC->CSR;
 
   /* USER CODE END Init */
 

@@ -141,6 +141,12 @@ extern volatile uint32_t ble_sync_last_error;
 extern volatile uint32_t ble_sync_last_abort_reason;
 extern volatile uint32_t ble_sync_session_start_ms;
 extern volatile uint32_t ble_sync_session_duration_ms;
+extern volatile uint32_t ble_sync_diag_last_ack_ms;
+extern volatile uint32_t ble_sync_diag_last_timeout_ms;
+extern volatile uint32_t ble_sync_diag_last_timeout_kind;
+extern volatile uint32_t ble_sync_diag_last_abort_ms;
+extern volatile uint32_t ble_sync_diag_cleanup_ms;
+extern volatile uint32_t ble_sync_diag_cleanup_count;
 extern volatile uint32_t ble_sync_protocol_self_test_failures;
 extern volatile BleSyncLatestDiagnostics ble_sync_latest;
 

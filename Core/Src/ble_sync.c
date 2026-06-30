@@ -71,6 +71,12 @@ volatile uint32_t ble_sync_last_error = BLE_SYNC_ERROR_NONE;
 volatile uint32_t ble_sync_last_abort_reason = BLE_SYNC_ABORT_NONE;
 volatile uint32_t ble_sync_session_start_ms = 0U;
 volatile uint32_t ble_sync_session_duration_ms = 0U;
+volatile uint32_t ble_sync_diag_last_ack_ms = 0U;
+volatile uint32_t ble_sync_diag_last_timeout_ms = 0U;
+volatile uint32_t ble_sync_diag_last_timeout_kind = 0U;
+volatile uint32_t ble_sync_diag_last_abort_ms = 0U;
+volatile uint32_t ble_sync_diag_cleanup_ms = 0U;
+volatile uint32_t ble_sync_diag_cleanup_count = 0U;
 volatile uint32_t ble_sync_protocol_self_test_failures = 0U;
 volatile BleSyncLatestDiagnostics ble_sync_latest;
 
@@ -632,6 +638,8 @@ static void ble_sync_pump_rx(uint32_t now_ms)
                                   now_ms,
                                   BLE_SYNC_FRAME_TIMEOUT_MS))
     {
+        ble_sync_diag_last_timeout_ms = now_ms;
+        ble_sync_diag_last_timeout_kind = 3U;
         BleSync_ResetParser(&context->parser);
         ble_sync_frame_length_errors++;
         ble_sync_queue_error(BLE_SYNC_ERROR_FRAME_TIMEOUT, 0U);
@@ -657,6 +665,7 @@ static void ble_sync_set_abort(BleSyncAbortReason reason)
 {
     ble_sync_context.abort_reason = reason;
     ble_sync_last_abort_reason = reason;
+    ble_sync_diag_last_abort_ms = HAL_GetTick();
     ble_sync_state = BLE_SYNC_ABORT;
 }
 
@@ -964,6 +973,7 @@ static void ble_sync_process_ack(void)
     context->pending_nack = 0U;
     context->acked_pages_since_persist++;
     ble_sync_pages_acked++;
+    ble_sync_diag_last_ack_ms = HAL_GetTick();
 
     if (context->acked_pages_since_persist >=
         BLE_SYNC_ACK_PERSIST_INTERVAL_PAGES)
@@ -1029,6 +1039,8 @@ static void ble_sync_send_abort(void)
 static void ble_sync_finish_session(uint8_t completed, uint32_t now_ms)
 {
     ble_sync_session_duration_ms = now_ms - ble_sync_session_start_ms;
+    ble_sync_diag_cleanup_ms = now_ms;
+    ble_sync_diag_cleanup_count++;
     if (completed != 0U)
     {
         ble_sync_sessions_completed++;
@@ -1043,10 +1055,11 @@ static void ble_sync_finish_session(uint8_t completed, uint32_t now_ms)
     ble_sync_active = 0U;
     ble_sync_requested = 0U;
     ble_sync_abort_requested = 0U;
-    ble_sync_state = BLE_SYNC_IDLE;
     ble_sync_context.pending_ack = 0U;
     ble_sync_context.pending_nack = 0U;
     ble_sync_context.sync_start_received = 0U;
+    BLE_ReleaseUartForLowPower();
+    ble_sync_state = BLE_SYNC_IDLE;
 }
 
 int BleSync_Init(NandLogger *logger)
@@ -1218,6 +1231,8 @@ int BleSync_StartSession(NandLogger *logger, uint32_t now_ms)
         return -1;
     }
 
+    BLE_WakeUart();
+
     context->logger = logger;
     context->prepare_started = 0U;
     context->sync_start_received = 0U;
@@ -1233,6 +1248,11 @@ int BleSync_StartSession(NandLogger *logger, uint32_t now_ms)
     ble_sync_current_retry_count = 0U;
     ble_sync_session_start_ms = now_ms;
     ble_sync_session_duration_ms = 0U;
+    ble_sync_diag_last_ack_ms = 0U;
+    ble_sync_diag_last_timeout_ms = 0U;
+    ble_sync_diag_last_timeout_kind = 0U;
+    ble_sync_diag_last_abort_ms = 0U;
+    ble_sync_diag_cleanup_ms = 0U;
     ble_sync_active = 1U;
     ble_sync_requested = 0U;
     ble_sync_abort_requested = 0U;
@@ -1316,6 +1336,8 @@ void BleSync_Process(NandLogger *logger, uint32_t now_ms, uint8_t usb_active)
             else if (ble_sync_deadline_reached(now_ms,
                                                context->start_deadline_ms) != 0U)
             {
+                ble_sync_diag_last_timeout_ms = now_ms;
+                ble_sync_diag_last_timeout_kind = 1U;
                 ble_sync_set_abort(BLE_SYNC_ABORT_START_TIMEOUT);
             }
             break;
@@ -1403,6 +1425,8 @@ void BleSync_Process(NandLogger *logger, uint32_t now_ms, uint8_t usb_active)
                 (ble_sync_deadline_reached(now_ms,
                                            context->ack_deadline_ms) != 0U))
             {
+                ble_sync_diag_last_timeout_ms = now_ms;
+                ble_sync_diag_last_timeout_kind = 2U;
                 ble_sync_ack_timeouts++;
                 ble_sync_retry_current_page(
                         BLE_SYNC_ABORT_MAXIMUM_RETRIES);
