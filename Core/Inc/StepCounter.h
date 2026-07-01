@@ -9,11 +9,13 @@
  *
  * Model version                  : 1.30
  * Simulink Coder version         : 26.1 (R2026a) 20-Nov-2025
- * C/C++ source code generated on : Tue Jun 30 12:03:50 2026
+ * C/C++ source code generated on : Wed Jul  1 11:01:54 2026
  *
  * Target selection: ert.tlc
- * Embedded hardware selection: Intel->x86-64 (Windows64)
- * Code generation objectives: Unspecified
+ * Embedded hardware selection: STMicroelectronics->ST10/Super10
+ * Code generation objectives:
+ *    1. Execution efficiency
+ *    2. RAM efficiency
  * Validation result: Not run
  */
 
@@ -27,9 +29,7 @@
 #include "math.h"
 #endif                                 /* StepCounter_COMMON_INCLUDES_ */
 
-#include "StepCounter_types.h"
 #include <string.h>
-#include "rt_defines.h"
 
 /* Macros for accessing real-time model data structure */
 #ifndef rtmGetErrorStatus
@@ -64,19 +64,18 @@
 #define rtmGetTStart(rtm)              ((rtm)->Timing.tStart)
 #endif
 
-/* Block signals (default storage) */
+/* Forward declaration for rtModel */
+typedef struct tag_RTM RT_MODEL;
+
+/* Block signals and states (default storage) for system '<Root>' */
 typedef struct {
   real_T TmpSignalConversionAtIntegrator[3];
   real_T y;                            /* '<S3>/MATLAB Function' */
-} B_StepCounter_T;
-
-/* Block states (default storage) for system '<Root>' */
-typedef struct {
   uint32_T Counter_ClkEphState;        /* '<S3>/Counter' */
   uint32_T Counter_RstEphState;        /* '<S3>/Counter' */
   uint16_T Counter1_Count;             /* '<S3>/Counter1' */
   uint16_T Counter_Count;              /* '<S3>/Counter' */
-} DW_StepCounter_T;
+} DW;
 
 /* Continuous states (default storage) */
 typedef struct {
@@ -84,7 +83,7 @@ typedef struct {
   real_T TransferFcn_CSTATE;           /* '<S1>/Transfer Fcn' */
   real_T TransferFcn1_CSTATE;          /* '<S1>/Transfer Fcn1' */
   real_T TransferFcn2_CSTATE;          /* '<S1>/Transfer Fcn2' */
-} X_StepCounter_T;
+} X;
 
 /* State derivatives (default storage) */
 typedef struct {
@@ -92,7 +91,7 @@ typedef struct {
   real_T TransferFcn_CSTATE;           /* '<S1>/Transfer Fcn' */
   real_T TransferFcn1_CSTATE;          /* '<S1>/Transfer Fcn1' */
   real_T TransferFcn2_CSTATE;          /* '<S1>/Transfer Fcn2' */
-} XDot_StepCounter_T;
+} XDot;
 
 /* State disabled  */
 typedef struct {
@@ -100,7 +99,7 @@ typedef struct {
   boolean_T TransferFcn_CSTATE;        /* '<S1>/Transfer Fcn' */
   boolean_T TransferFcn1_CSTATE;       /* '<S1>/Transfer Fcn1' */
   boolean_T TransferFcn2_CSTATE;       /* '<S1>/Transfer Fcn2' */
-} XDis_StepCounter_T;
+} XDis;
 
 #ifndef ODE3_INTG
 #define ODE3_INTG
@@ -116,25 +115,23 @@ typedef struct {
 /* External outputs (root outports fed by signals with default storage) */
 typedef struct {
   uint16_T stepnumber;                 /* '<Root>/step number' */
-} ExtY_StepCounter_T;
+} ExtY;
 
 /* Real-time Model Data Structure */
-struct tag_RTM_StepCounter_T {
+struct tag_RTM {
   const char_T *errorStatus;
   RTWSolverInfo solverInfo;
-  B_StepCounter_T *blockIO;
-  X_StepCounter_T *contStates;
+  X *contStates;
   int_T *periodicContStateIndices;
   real_T *periodicContStateRanges;
   real_T *derivs;
-  XDis_StepCounter_T *contStateDisabled;
+  XDis *contStateDisabled;
   boolean_T zCCacheNeedsReset;
   boolean_T derivCacheNeedsReset;
   boolean_T CTOutputIncnstWithState;
   real_T odeY[6];
   real_T odeF[3][6];
   ODE3_IntgData intgData;
-  DW_StepCounter_T *dwork;
 
   /*
    * Sizes:
@@ -169,12 +166,30 @@ struct tag_RTM_StepCounter_T {
   } Timing;
 };
 
+/* Continuous states (default storage) */
+extern X rtX;
+
+/* Disabled states (default storage) */
+extern XDis rtXDis;
+
+/* Block signals and states (default storage) */
+extern DW rtDW;
+
+/* External outputs (root outports fed by signals with default storage) */
+extern ExtY rtY;
+
 /* Model entry point functions */
-extern void StepCounter_initialize(RT_MODEL_StepCounter_T *const StepCounter_M,
-  ExtY_StepCounter_T *StepCounter_Y);
-extern void StepCounter_step(RT_MODEL_StepCounter_T *const StepCounter_M,
-  ExtY_StepCounter_T *StepCounter_Y);
-extern void StepCounter_terminate(RT_MODEL_StepCounter_T *const StepCounter_M);
+extern void StepCounter_initialize(void);
+extern void StepCounter_step(void);
+
+/* Exported data declaration */
+
+/* Declaration for custom storage class: ImportFromFile */
+extern real_T rtIn1[3];                /* '<Root>/In1' */
+extern real_T rtIn2[3];                /* '<Root>/In2' */
+
+/* Real-time Model object */
+extern RT_MODEL *const rtM;
 
 /*-
  * These blocks were eliminated from the model due to optimizations:
