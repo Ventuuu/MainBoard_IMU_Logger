@@ -7,9 +7,9 @@
  *
  * Code generated for Simulink model 'StepCounter'.
  *
- * Model version                  : 1.27
+ * Model version                  : 1.30
  * Simulink Coder version         : 26.1 (R2026a) 20-Nov-2025
- * C/C++ source code generated on : Sat Jun 27 23:03:37 2026
+ * C/C++ source code generated on : Tue Jun 30 12:03:50 2026
  *
  * Target selection: ert.tlc
  * Embedded hardware selection: Intel->x86-64 (Windows64)

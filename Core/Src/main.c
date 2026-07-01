@@ -40,6 +40,7 @@
 #include "bluetooth.h"
 #include "as7341_driver.h"
 #include "StepCounter.h"
+#include <stdint.h>
 
 
 /* USER CODE END Includes */
@@ -78,6 +79,7 @@ UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
+
 /* USER CODE BEGIN PV */
 
 // --- State Machine ---
@@ -97,9 +99,14 @@ uint8_t raw_gyroscope[6]     = {0};
 static AS7341_Data light_data;
 static AS7341_Spectrum spectrum;        /* full spectral frame */
 
+// --- Step Counter data ---
+RT_MODEL_StepCounter_T *const StepCounter_M; // step counter struct
+ExtY_StepCounter_T *StepCounter_Y; // step counter output struct
+uint16_t step_count = 0;
+
 /*
- * raw_light layout (22 bytes):
- *   [0..15]  8 spectral filters F1..F8 (uint16 each, little-endian)
+* raw_light layout (22 bytes):
+*   [0..15]  8 spectral filters F1..F8 (uint16 each, little-endian)
  *   [16..17] Clear channel   (uint16, little-endian)
  *   [18..19] NIR   channel   (uint16, little-endian)
  *   [20..21] Mains freq (uint16, little-endian: 0, 50 or 60 Hz equivalent)
@@ -209,7 +216,7 @@ int main(void)
   }
 
   //step counter initialization
-  StepCounter_initialize();
+  StepCounter_initialize(StepCounter_M, StepCounter_Y);
 
 
   /* Initialize the AS7341 light sensor on the same I2C bus (hi2c3). */
@@ -813,9 +820,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     /* --- Read IMU (always) --- */
     IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
     IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
+    
 
     /* --- Read steps   ---*/
-      StepCounter_step();
+    StepCounter_M->contStates->TransferFcn_CSTATE = (int16_t)((raw_gyroscope[1] << 8) | raw_gyroscope[0]);
+    StepCounter_M->contStates->TransferFcn1_CSTATE  = (int16_t)((raw_gyroscope[3] << 8) | raw_gyroscope[2]);
+    StepCounter_M->contStates->TransferFcn2_CSTATE  = (int16_t)((raw_gyroscope[5] << 8) | raw_gyroscope[4]);
+    StepCounter_step(StepCounter_M, StepCounter_Y);
+
+    step_count = StepCounter_Y->stepnumber;
 
     /* --- Read light sensor (every LIGHT_SUBSAMPLE ticks = 10 Hz) --- */
     light_tick++;
@@ -912,7 +925,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		tim++;
 
 		/* --- Pack and save to NAND (IMU + light) --- */
-		write_packet(sample, timestamp, raw_accelerometer, raw_gyroscope, raw_light, NAND_packet);
+		write_packet(sample, timestamp, raw_accelerometer, raw_gyroscope, raw_light, step_count, NAND_packet);
 		sample++;
         write_memory();
 	}

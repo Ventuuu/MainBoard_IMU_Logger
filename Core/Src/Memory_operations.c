@@ -77,6 +77,7 @@ void erase_good_blocks(uint8_t *bad_blocks){
 void write_packet(uint16_t sample, Time_Struct timestamp,
                   uint8_t *accelerometer, uint8_t *gyroscope,
                   uint8_t *light_raw,
+				  uint16_t step_count,
                   uint8_t *NAND_packet)
 {
 	uint16_t base = sample * STRIDE_BYTES_PER_SAMPLE;
@@ -122,5 +123,5 @@ void write_packet(uint16_t sample, Time_Struct timestamp,
 	NAND_packet[base + 38] = light_raw[21];
 
 	/* Reserved byte: zero for now */
-	NAND_packet[base + 39] = 0x00;
+	NAND_packet[base + 39] = step_count;
 }

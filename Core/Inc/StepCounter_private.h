@@ -7,9 +7,9 @@
  *
  * Code generated for Simulink model 'StepCounter'.
  *
- * Model version                  : 1.27
+ * Model version                  : 1.30
  * Simulink Coder version         : 26.1 (R2026a) 20-Nov-2025
- * C/C++ source code generated on : Sat Jun 27 23:03:37 2026
+ * C/C++ source code generated on : Tue Jun 30 12:03:50 2026
  *
  * Target selection: ert.tlc
  * Embedded hardware selection: Intel->x86-64 (Windows64)
@@ -33,15 +33,6 @@
 
 #ifndef rtmSetTPtr
 #define rtmSetTPtr(rtm, val)           ((rtm)->Timing.t = (val))
-#endif
-
-/* Used by FromWorkspace Block: '<Root>/From Workspace1' */
-#ifndef rtInterpolate
-# define rtInterpolate(v1,v2,f1,f2)    (((v1)==(v2))?((double)(v1)): (((f1)*((double)(v1)))+((f2)*((double)(v2)))))
-#endif
-
-#ifndef rtRound
-# define rtRound(v)                    ( ((v) >= 0) ? floor((v) + 0.5) : ceil((v) - 0.5) )
 #endif
 
 #ifndef UCHAR_MAX
@@ -92,8 +83,16 @@ Verification pane for ERT based targets, which will disable the \
 preprocessor word size checks.
 #endif
 
+extern uint32_T MWDSP_EPH_R_D(real_T evt, uint32_T *sta);
+
 /* private model entry point functions */
-extern void StepCounter_derivatives(void);
+extern void StepCounter_derivatives(RT_MODEL_StepCounter_T *const StepCounter_M);
+
+/* Exported data declaration */
+
+/* Declaration for custom storage class: ImportFromFile */
+extern real_T StepCounter_In1[3];      /* '<Root>/In1' */
+extern real_T StepCounter_In2[3];      /* '<Root>/In2' */
 
 #endif                                 /* StepCounter_private_h_ */
 

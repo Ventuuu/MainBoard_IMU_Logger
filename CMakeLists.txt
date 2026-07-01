@@ -8,6 +8,7 @@ cmake_minimum_required(VERSION 3.22)
 #
 
 # Setup compiler settings
+set(CMAKE_C_COMPILER "C:/Users/Claudio/AppData/Local/stm32cube/bundles/st-arm-clangd/19.1.2+st.3/bin/starm-clangd.exe")
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
@@ -59,6 +60,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/USB_Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
     # Add user defined sources
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/as7341_driver.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/StepCounter.c
 )
 
 # Add include paths
@@ -85,3 +87,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+message(STATUS "=== C Compiler Information ===")  
+message(STATUS "C Compiler Path: ${CMAKE_C_COMPILER}")  
+message(STATUS "C Compiler ID: ${CMAKE_C_COMPILER_ID}")  
+message(STATUS "C Compiler Version: ${CMAKE_C_COMPILER_VERSION}")  
+

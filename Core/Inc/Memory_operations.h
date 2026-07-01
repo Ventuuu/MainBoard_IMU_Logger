@@ -60,6 +60,7 @@ NAND_info read_info(uint16_t bad_blocks[2048]);
 void write_packet(uint16_t sample, Time_Struct timestamp,
                   uint8_t *accelerometer, uint8_t *gyroscope,
                   uint8_t *light_raw,
+                  uint16_t step_count,
                   uint8_t *NAND_packet);
 
 void erase_memory(void);

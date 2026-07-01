@@ -7,9 +7,9 @@
  *
  * Code generated for Simulink model 'StepCounter'.
  *
- * Model version                  : 1.27
+ * Model version                  : 1.30
  * Simulink Coder version         : 26.1 (R2026a) 20-Nov-2025
- * C/C++ source code generated on : Sat Jun 27 23:03:37 2026
+ * C/C++ source code generated on : Tue Jun 30 12:03:50 2026
  *
  * Target selection: ert.tlc
  * Embedded hardware selection: Intel->x86-64 (Windows64)
@@ -28,8 +28,8 @@
 #endif                                 /* StepCounter_COMMON_INCLUDES_ */
 
 #include "StepCounter_types.h"
-#include <math.h>
 #include <string.h>
+#include "rt_defines.h"
 
 /* Macros for accessing real-time model data structure */
 #ifndef rtmGetErrorStatus
@@ -67,33 +67,15 @@
 /* Block signals (default storage) */
 typedef struct {
   real_T TmpSignalConversionAtIntegrator[3];
-  real_T FromWorkspace[3];             /* '<Root>/From Workspace' */
   real_T y;                            /* '<S3>/MATLAB Function' */
 } B_StepCounter_T;
 
 /* Block states (default storage) for system '<Root>' */
 typedef struct {
-  struct {
-    void *TimePtr;
-    void *DataPtr;
-    void *RSimInfoPtr;
-  } FromWorkspace1_PWORK;              /* '<Root>/From Workspace1' */
-
-  struct {
-    void *TimePtr;
-    void *DataPtr;
-    void *RSimInfoPtr;
-  } FromWorkspace_PWORK;               /* '<Root>/From Workspace' */
-
-  struct {
-    int_T PrevIndex;
-  } FromWorkspace1_IWORK;              /* '<Root>/From Workspace1' */
-
-  struct {
-    int_T PrevIndex;
-  } FromWorkspace_IWORK;               /* '<Root>/From Workspace' */
-
+  uint32_T Counter_ClkEphState;        /* '<S3>/Counter' */
+  uint32_T Counter_RstEphState;        /* '<S3>/Counter' */
   uint16_T Counter1_Count;             /* '<S3>/Counter1' */
+  uint16_T Counter_Count;              /* '<S3>/Counter' */
 } DW_StepCounter_T;
 
 /* Continuous states (default storage) */
@@ -131,10 +113,16 @@ typedef struct {
 
 #endif
 
+/* External outputs (root outports fed by signals with default storage) */
+typedef struct {
+  uint16_T stepnumber;                 /* '<Root>/step number' */
+} ExtY_StepCounter_T;
+
 /* Real-time Model Data Structure */
 struct tag_RTM_StepCounter_T {
   const char_T *errorStatus;
   RTWSolverInfo solverInfo;
+  B_StepCounter_T *blockIO;
   X_StepCounter_T *contStates;
   int_T *periodicContStateIndices;
   real_T *periodicContStateRanges;
@@ -146,6 +134,7 @@ struct tag_RTM_StepCounter_T {
   real_T odeY[6];
   real_T odeF[3][6];
   ODE3_IntgData intgData;
+  DW_StepCounter_T *dwork;
 
   /*
    * Sizes:
@@ -180,25 +169,12 @@ struct tag_RTM_StepCounter_T {
   } Timing;
 };
 
-/* Block signals (default storage) */
-extern B_StepCounter_T StepCounter_B;
-
-/* Continuous states (default storage) */
-extern X_StepCounter_T StepCounter_X;
-
-/* Disabled states (default storage) */
-extern XDis_StepCounter_T StepCounter_XDis;
-
-/* Block states (default storage) */
-extern DW_StepCounter_T StepCounter_DW;
-
 /* Model entry point functions */
-extern void StepCounter_initialize(void);
-extern void StepCounter_step(void);
-extern void StepCounter_terminate(void);
-
-/* Real-time Model object */
-extern RT_MODEL_StepCounter_T *const StepCounter_M;
+extern void StepCounter_initialize(RT_MODEL_StepCounter_T *const StepCounter_M,
+  ExtY_StepCounter_T *StepCounter_Y);
+extern void StepCounter_step(RT_MODEL_StepCounter_T *const StepCounter_M,
+  ExtY_StepCounter_T *StepCounter_Y);
+extern void StepCounter_terminate(RT_MODEL_StepCounter_T *const StepCounter_M);
 
 /*-
  * These blocks were eliminated from the model due to optimizations:
@@ -211,8 +187,6 @@ extern RT_MODEL_StepCounter_T *const StepCounter_M;
  * Block '<Root>/Scope5' : Unused code path elimination
  * Block '<Root>/Scope6' : Unused code path elimination
  * Block '<Root>/Scope8' : Unused code path elimination
- * Block '<S3>/Counter' : Unused code path elimination
- * Block '<S3>/Zero' : Unused code path elimination
  */
 
 /*-
