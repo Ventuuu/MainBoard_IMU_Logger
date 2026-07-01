@@ -76,8 +76,7 @@ void erase_good_blocks(uint8_t *bad_blocks){
  */
 void write_packet(uint16_t sample, Time_Struct timestamp,
                   uint8_t *accelerometer, uint8_t *gyroscope,
-                  uint8_t *light_raw,
-				  uint16_t step_count,
+				  uint8_t step_count,
                   uint8_t *NAND_packet)
 {
 	uint16_t base = sample * STRIDE_BYTES_PER_SAMPLE;
@@ -109,18 +108,18 @@ void write_packet(uint16_t sample, Time_Struct timestamp,
 
 	/* Light filters F1..F8 (16 bytes: 8 channels × 2 bytes, indices 0..15) */
 	for (uint8_t i = 0; i < 16; i++) {
-		NAND_packet[base + 17 + i] = light_raw[i];
+		NAND_packet[base + 17 + i] = 0;//light_raw[i];
 	}
 
 	/* Clear and NIR (4 bytes: indices 16..19) */
-	NAND_packet[base + 33] = light_raw[16];  /* Clear LSB */
-	NAND_packet[base + 34] = light_raw[17];  /* Clear MSB */
-	NAND_packet[base + 35] = light_raw[18];  /* NIR LSB   */
-	NAND_packet[base + 36] = light_raw[19];  /* NIR MSB   */
+	NAND_packet[base + 33] =0; //light_raw[16];  /* Clear LSB */
+	NAND_packet[base + 34] =0; //light_raw[17];  /* Clear MSB */
+	NAND_packet[base + 35] =0; //light_raw[18];  /* NIR LSB   */
+	NAND_packet[base + 36] =0; //light_raw[19];  /* NIR MSB   */
 
 	/* Mains flicker category (2 bytes: indices 20..21, little-endian) */
-	NAND_packet[base + 37] = light_raw[20];
-	NAND_packet[base + 38] = light_raw[21];
+	NAND_packet[base + 37] =0; //light_raw[20];
+	NAND_packet[base + 38] =0; //light_raw[21];
 
 	/* Reserved byte: zero for now */
 	NAND_packet[base + 39] = step_count;

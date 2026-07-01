@@ -7,15 +7,13 @@
  *
  * Code generated for Simulink model 'StepCounter'.
  *
- * Model version                  : 1.30
+ * Model version                  : 1.33
  * Simulink Coder version         : 26.1 (R2026a) 20-Nov-2025
- * C/C++ source code generated on : Wed Jul  1 11:01:54 2026
+ * C/C++ source code generated on : Wed Jul  1 18:27:25 2026
  *
  * Target selection: ert.tlc
- * Embedded hardware selection: STMicroelectronics->ST10/Super10
- * Code generation objectives:
- *    1. Execution efficiency
- *    2. RAM efficiency
+ * Embedded hardware selection: ARM Compatible->ARM Cortex-M
+ * Code generation objectives: Unspecified
  * Validation result: Not run
  */
 
@@ -29,9 +27,99 @@
 #include "math.h"
 #endif                                 /* StepCounter_COMMON_INCLUDES_ */
 
+#include "StepCounter_types.h"
 #include <string.h>
+#include <stddef.h>
 
 /* Macros for accessing real-time model data structure */
+#ifndef rtmGetContStateDisabled
+#define rtmGetContStateDisabled(rtm)   ((rtm)->contStateDisabled)
+#endif
+
+#ifndef rtmSetContStateDisabled
+#define rtmSetContStateDisabled(rtm, val) ((rtm)->contStateDisabled = (val))
+#endif
+
+#ifndef rtmGetContStates
+#define rtmGetContStates(rtm)          ((rtm)->contStates)
+#endif
+
+#ifndef rtmSetContStates
+#define rtmSetContStates(rtm, val)     ((rtm)->contStates = (val))
+#endif
+
+#ifndef rtmGetContTimeOutputInconsistentWithStateAtMajorStepFlag
+#define rtmGetContTimeOutputInconsistentWithStateAtMajorStepFlag(rtm) ((rtm)->CTOutputIncnstWithState)
+#endif
+
+#ifndef rtmSetContTimeOutputInconsistentWithStateAtMajorStepFlag
+#define rtmSetContTimeOutputInconsistentWithStateAtMajorStepFlag(rtm, val) ((rtm)->CTOutputIncnstWithState = (val))
+#endif
+
+#ifndef rtmGetDerivCacheNeedsReset
+#define rtmGetDerivCacheNeedsReset(rtm) ((rtm)->derivCacheNeedsReset)
+#endif
+
+#ifndef rtmSetDerivCacheNeedsReset
+#define rtmSetDerivCacheNeedsReset(rtm, val) ((rtm)->derivCacheNeedsReset = (val))
+#endif
+
+#ifndef rtmGetIntgData
+#define rtmGetIntgData(rtm)            ((rtm)->intgData)
+#endif
+
+#ifndef rtmSetIntgData
+#define rtmSetIntgData(rtm, val)       ((rtm)->intgData = (val))
+#endif
+
+#ifndef rtmGetOdeF
+#define rtmGetOdeF(rtm)                ((rtm)->odeF)
+#endif
+
+#ifndef rtmSetOdeF
+#define rtmSetOdeF(rtm, val)           ((rtm)->odeF = (val))
+#endif
+
+#ifndef rtmGetOdeY
+#define rtmGetOdeY(rtm)                ((rtm)->odeY)
+#endif
+
+#ifndef rtmSetOdeY
+#define rtmSetOdeY(rtm, val)           ((rtm)->odeY = (val))
+#endif
+
+#ifndef rtmGetPeriodicContStateIndices
+#define rtmGetPeriodicContStateIndices(rtm) ((rtm)->periodicContStateIndices)
+#endif
+
+#ifndef rtmSetPeriodicContStateIndices
+#define rtmSetPeriodicContStateIndices(rtm, val) ((rtm)->periodicContStateIndices = (val))
+#endif
+
+#ifndef rtmGetPeriodicContStateRanges
+#define rtmGetPeriodicContStateRanges(rtm) ((rtm)->periodicContStateRanges)
+#endif
+
+#ifndef rtmSetPeriodicContStateRanges
+#define rtmSetPeriodicContStateRanges(rtm, val) ((rtm)->periodicContStateRanges = (val))
+#endif
+
+#ifndef rtmGetZCCacheNeedsReset
+#define rtmGetZCCacheNeedsReset(rtm)   ((rtm)->zCCacheNeedsReset)
+#endif
+
+#ifndef rtmSetZCCacheNeedsReset
+#define rtmSetZCCacheNeedsReset(rtm, val) ((rtm)->zCCacheNeedsReset = (val))
+#endif
+
+#ifndef rtmGetdX
+#define rtmGetdX(rtm)                  ((rtm)->derivs)
+#endif
+
+#ifndef rtmSetdX
+#define rtmSetdX(rtm, val)             ((rtm)->derivs = (val))
+#endif
+
 #ifndef rtmGetErrorStatus
 #define rtmGetErrorStatus(rtm)         ((rtm)->errorStatus)
 #endif
@@ -64,18 +152,26 @@
 #define rtmGetTStart(rtm)              ((rtm)->Timing.tStart)
 #endif
 
-/* Forward declaration for rtModel */
-typedef struct tag_RTM RT_MODEL;
-
-/* Block signals and states (default storage) for system '<Root>' */
+/* Block signals (default storage) */
 typedef struct {
+  real_T y_tmp[9];
+  real_T TmpSignalConversionAtIntegrat_m[9];
+  real_T y_tmp_c[9];
   real_T TmpSignalConversionAtIntegrator[3];
   real_T y;                            /* '<S3>/MATLAB Function' */
+  real_T TransferFcn1;                 /* '<S1>/Transfer Fcn1' */
+  real_T TransferFcn2;                 /* '<S1>/Transfer Fcn2' */
+  real_T TmpSignalConversionAtIntegrat_k;
+  real_T TmpSignalConversionAtIntegrat_c;
+} B_StepCounter_T;
+
+/* Block states (default storage) for system '<Root>' */
+typedef struct {
   uint32_T Counter_ClkEphState;        /* '<S3>/Counter' */
   uint32_T Counter_RstEphState;        /* '<S3>/Counter' */
   uint16_T Counter1_Count;             /* '<S3>/Counter1' */
   uint16_T Counter_Count;              /* '<S3>/Counter' */
-} DW;
+} DW_StepCounter_T;
 
 /* Continuous states (default storage) */
 typedef struct {
@@ -83,7 +179,7 @@ typedef struct {
   real_T TransferFcn_CSTATE;           /* '<S1>/Transfer Fcn' */
   real_T TransferFcn1_CSTATE;          /* '<S1>/Transfer Fcn1' */
   real_T TransferFcn2_CSTATE;          /* '<S1>/Transfer Fcn2' */
-} X;
+} X_StepCounter_T;
 
 /* State derivatives (default storage) */
 typedef struct {
@@ -91,7 +187,7 @@ typedef struct {
   real_T TransferFcn_CSTATE;           /* '<S1>/Transfer Fcn' */
   real_T TransferFcn1_CSTATE;          /* '<S1>/Transfer Fcn1' */
   real_T TransferFcn2_CSTATE;          /* '<S1>/Transfer Fcn2' */
-} XDot;
+} XDot_StepCounter_T;
 
 /* State disabled  */
 typedef struct {
@@ -99,7 +195,7 @@ typedef struct {
   boolean_T TransferFcn_CSTATE;        /* '<S1>/Transfer Fcn' */
   boolean_T TransferFcn1_CSTATE;       /* '<S1>/Transfer Fcn1' */
   boolean_T TransferFcn2_CSTATE;       /* '<S1>/Transfer Fcn2' */
-} XDis;
+} XDis_StepCounter_T;
 
 #ifndef ODE3_INTG
 #define ODE3_INTG
@@ -112,20 +208,26 @@ typedef struct {
 
 #endif
 
+/* External inputs (root inport signals with default storage) */
+typedef struct {
+  real_T In1[3];                       /* '<Root>/In1' */
+  real_T In2[3];                       /* '<Root>/In2' */
+} ExtU_StepCounter_T;
+
 /* External outputs (root outports fed by signals with default storage) */
 typedef struct {
   uint16_T stepnumber;                 /* '<Root>/step number' */
-} ExtY;
+} ExtY_StepCounter_T;
 
 /* Real-time Model Data Structure */
-struct tag_RTM {
+struct tag_RTM_StepCounter_T {
   const char_T *errorStatus;
   RTWSolverInfo solverInfo;
-  X *contStates;
+  X_StepCounter_T *contStates;
   int_T *periodicContStateIndices;
   real_T *periodicContStateRanges;
   real_T *derivs;
-  XDis *contStateDisabled;
+  XDis_StepCounter_T *contStateDisabled;
   boolean_T zCCacheNeedsReset;
   boolean_T derivCacheNeedsReset;
   boolean_T CTOutputIncnstWithState;
@@ -154,10 +256,6 @@ struct tag_RTM {
     uint32_T clockTick0;
     time_T stepSize0;
     uint32_T clockTick1;
-    struct {
-      uint8_T TID[2];
-    } TaskCounters;
-
     time_T tStart;
     SimTimeStep simTimeStep;
     boolean_T stopRequestedFlag;
@@ -166,30 +264,33 @@ struct tag_RTM {
   } Timing;
 };
 
+/* Block signals (default storage) */
+extern B_StepCounter_T StepCounter_B;
+
 /* Continuous states (default storage) */
-extern X rtX;
+extern X_StepCounter_T StepCounter_X;
 
 /* Disabled states (default storage) */
-extern XDis rtXDis;
+extern XDis_StepCounter_T StepCounter_XDis;
 
-/* Block signals and states (default storage) */
-extern DW rtDW;
+/* Block states (default storage) */
+extern DW_StepCounter_T StepCounter_DW;
+
+/* External inputs (root inport signals with default storage) */
+extern ExtU_StepCounter_T StepCounter_U;
 
 /* External outputs (root outports fed by signals with default storage) */
-extern ExtY rtY;
+extern ExtY_StepCounter_T StepCounter_Y;
 
 /* Model entry point functions */
 extern void StepCounter_initialize(void);
 extern void StepCounter_step(void);
-
-/* Exported data declaration */
-
-/* Declaration for custom storage class: ImportFromFile */
-extern real_T rtIn1[3];                /* '<Root>/In1' */
-extern real_T rtIn2[3];                /* '<Root>/In2' */
+extern void StepCounter_terminate(void);
 
 /* Real-time Model object */
-extern RT_MODEL *const rtM;
+extern RT_MODEL_StepCounter_T *const StepCounter_M;
+extern volatile boolean_T stopRequested;
+extern volatile boolean_T runModel;
 
 /*-
  * These blocks were eliminated from the model due to optimizations:

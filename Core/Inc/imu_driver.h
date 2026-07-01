@@ -12,6 +12,8 @@
 #include "stdint.h"
 #include "main.h"
 
+#define DEG2RAD 0.01745329252f
+
 // --- I2C Communication Settings ---
 // The I2C slave address of the LSM6DSO16IS is 0x6B (7-bit format).
 // This is the address to be used with the HAL library functions.

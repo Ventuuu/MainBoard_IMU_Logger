@@ -4,23 +4,20 @@
   * @file           : main.c
   * @brief          : Main application file for MainBoard_IMU_Logger project.
   ******************************************************************************
-  * @functionality  : This firmware implements a complete Data Logger for the on board IMU
-  *                   and the AS7341 spectral light sensor.
+  * @functionality  : This firmware implements a complete Data Logger for the on board IMU.
   * @details        : The application operates using a State Machine triggered by a
   * single USER BUTTON. It performs three primary tasks:
-  * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data from the LSM6DSO16IS
-  *    via I2C at 100 Hz (TIM2), and Clear/NIR channels plus full spectral
-  *    filters and mains flicker classification from the AS7341 at ~10 Hz
-  *    (every 10th timer tick) on the same I2C bus (hi2c3).
+  * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data
+  * via I2C, synchronized by a TIM2 interrupt.
   * 2. Wireless Transmission: Sends data packets via Bluetooth Low Energy (BLE)
-  *    using the UART interface.
+  * using the UART interface.
   * 3. Data Logging: Saves acquired data to NAND Flash memory.
   *
   * Saved data can be downloaded via a USB Virtual COM Port (VCP)
   * connection, also initiated by the USER BUTTON.
   *
   * @intended_use   : Starting template for Smart Wearables Course
-  * exploring IMU/light sensor interfacing, BLE communication, and memory management.
+  * exploring IMU interfacing, BLE communication, and memory management.
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -38,10 +35,8 @@
 #include "led_driver.h"
 #include "imu_driver.h"
 #include "bluetooth.h"
-#include "as7341_driver.h"
 #include "StepCounter.h"
 #include <stdint.h>
-
 
 /* USER CODE END Includes */
 
@@ -53,8 +48,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* Light sensor is sampled every LIGHT_SUBSAMPLE IMU ticks (100 Hz / 10 = 10 Hz) */
-#define LIGHT_SUBSAMPLE  10U
+
 
 /* USER CODE END PD */
 
@@ -79,40 +73,24 @@ UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
-
 /* USER CODE BEGIN PV */
 
 // --- State Machine ---
+// The current state of the application. Initial state is IDLE.
 static AppState current_state = STATE_IDLE;
 
-// --- Global Flags ---
+// --- Global Flags and Variables ---
+// Flag to indicate a USB connection event.
+// Set to 1 when a USB connection is detected.
 uint8_t usb_flag = 0;
 
-// --- IMU data ---
+// IMU data structures for accelerometer and gyroscope.
 static IMU_Data accelerometer_data;
 static IMU_Data gyroscope_data;
 
 uint8_t raw_accelerometer[6] = {0};
-uint8_t raw_gyroscope[6]     = {0};
-
-// --- Light sensor data ---
-static AS7341_Data light_data;
-static AS7341_Spectrum spectrum;        /* full spectral frame */
-
-// --- Step Counter data ---
-RT_MODEL_StepCounter_T *const StepCounter_M; // step counter struct
-ExtY_StepCounter_T *StepCounter_Y; // step counter output struct
-uint16_t step_count = 0;
-
-/*
-* raw_light layout (22 bytes):
-*   [0..15]  8 spectral filters F1..F8 (uint16 each, little-endian)
- *   [16..17] Clear channel   (uint16, little-endian)
- *   [18..19] NIR   channel   (uint16, little-endian)
- *   [20..21] Mains freq (uint16, little-endian: 0, 50 or 60 Hz equivalent)
- */
-uint8_t raw_light[22] = {0};
-static uint8_t light_tick = 0; /* subsample counter */
+uint8_t raw_gyroscope[6] = {0};
+uint8_t step_count = 0;
 
 /// ----- NAND FLASH variables ----- ///
 
@@ -125,8 +103,8 @@ uint16_t b = 0;
 read_address_t blocco;
 column_address_t colonna = 0;
 
-uint16_t bad_blocks[2048]={-1};
-uint8_t bad_blocks2[2048]={0};
+uint16_t bad_blocks[2048]={-1}; // bad blocks array for writing/reading
+uint8_t bad_blocks2[2048]={0}; // bad blocks array for erasing
 
 uint8_t data_letto[4096] = {0};
 int exit_flag = 0;
@@ -170,19 +148,21 @@ int main(void)
 
   /* MCU Configuration--------------------------------------------------------*/
 
-
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
 
+  /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
 
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ICACHE_Init();
   MX_I2C3_Init();
@@ -194,41 +174,42 @@ int main(void)
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
 
+  // Turn the RED LED on to indicate the start of the initialization process
   LED_On(LED_RED);
 
+  // Initialize all hardware peripherals (ble, usb, nand flash, imu)
   BLE_Initialize();
   MX_USB_Device_Init();
   HAL_Delay(1000);
 
   spi_nand_init();
-  find_bad_blocks(bad_blocks);
+  find_bad_blocks(bad_blocks); // find bad_blocks and save them
 
   if(IMU_Init() == 1) {
+    // If IMU is successfully initialized, configure the sensors
+    // Configure Accelerometer: 52 Hz ODR, ±2g FS, High Performance
     IMU_ConfigAccelerometer(ACC_ODR_52HZ, ACC_FS_2G, 1);
+    // Configure Gyroscope: 52 Hz ODR, 250 dps FS, High Performance
     IMU_ConfigGyroscope(GYR_ODR_52HZ, GYR_FS_250DPS, 1);
+      // step counter initialization
+    StepCounter_initialize();
   } else {
-    LED_Toggle(LED_RED); HAL_Delay(500);
-    LED_Toggle(LED_RED); HAL_Delay(500);
-    LED_Toggle(LED_RED); HAL_Delay(500);
-    LED_Toggle(LED_RED); HAL_Delay(500);
-    LED_Toggle(LED_RED); HAL_Delay(500);
-    LED_Toggle(LED_RED); HAL_Delay(500);
+    // IMU initialization failed, blink red LED for 2 seconds
+	LED_Toggle(LED_RED);
+	HAL_Delay(500);
+	LED_Toggle(LED_RED);
+	HAL_Delay(500);
+	LED_Toggle(LED_RED);
+	HAL_Delay(500);
+	LED_Toggle(LED_RED);
+	HAL_Delay(500);
+	LED_Toggle(LED_RED);
+	HAL_Delay(500);
+	LED_Toggle(LED_RED);
+	HAL_Delay(500);
   }
 
-  //step counter initialization
-  StepCounter_initialize(StepCounter_M, StepCounter_Y);
-
-
-  /* Initialize the AS7341 light sensor on the same I2C bus (hi2c3). */
-  if (AS7341_Init() != 1) {
-    /* Light sensor not found or failed: blink RED 3x quickly to warn,
-     * but continue running (IMU logging still works). */
-    for (uint8_t i = 0; i < 3; i++) {
-      LED_Toggle(LED_RED); HAL_Delay(150);
-      LED_Toggle(LED_RED); HAL_Delay(150);
-    }
-  }
-
+  // Turn off the red LED to indicate that initialization is complete
   LED_Off(LED_RED);
 
   /* USER CODE END 2 */
@@ -240,29 +221,42 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+		//LED_Toggle(LED_GREEN);
+		//HAL_Delay(1000);
+
 	  switch(current_state)
 	  {
 	  	  case STATE_IDLE:
+	  		// Check if a USB connection has been detected
 	  		if(!usb_flag)
 		    {
 	  			//MX_USB_Device_Init();
 		    }
 	  		else
 	  		{
-			   current_state = STATE_USB_CONNECTED;
+			   // Transition to the USB_CONNECTED state
+	  		   current_state = STATE_USB_CONNECTED;
+			   // Green LED on upon USB Connection
 			   LED_On(LED_GREEN);
 		    }
 	  		break;
 
 	  	  case STATE_ACQUISITION:
-	  		   /* All acquisition handled in TIM2 callback */
+	  		   // All data acquisition is handled by the timer interrupt
+
 			break;
 
 	  	  case STATE_USB_CONNECTED:
 	  		break;
 
 	  	  case STATE_DOWNLOAD:
+
+	  		   // This state manages reading data blocks and sending them via USB.
+	  		  // Once download is complete, the state returns to USB_CONNECTED.
+	  		  // Read data packets from memory
 	  		  read_memory_and_transmit();
+
 			 current_state = STATE_USB_CONNECTED;
 	  		 break;
 	  }
@@ -800,180 +794,136 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
-
-
-
 /* USER CODE BEGIN 4 */
 /**
-  * @brief  TIM2 period elapsed callback — 100 Hz IMU + 10 Hz light sensor.
-  *
-  * The IMU is read on every tick (100 Hz).
-  * The AS7341 is read every LIGHT_SUBSAMPLE ticks (10 Hz) because its
-  * integration time (~18 ms) is longer than one IMU tick (10 ms).
-  * Between light reads, the previous raw_light[] value is reused in the
-  * NAND packet so every record is the same fixed size (BYTES_PER_SAMPLE).
+  * @brief  Callback function for the timer period elapsed event.
+  * This function is triggered by a hardware timer at a fixed interval.
+  * @param  htim: Pointer to the timer handle.
   */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if(htim == &htim2)
-  {
-    /* --- Read IMU (always) --- */
-    IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
-    IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
-    
+	if(htim == &htim2){
 
-    /* --- Read steps   ---*/
-    StepCounter_M->contStates->TransferFcn_CSTATE = (int16_t)((raw_gyroscope[1] << 8) | raw_gyroscope[0]);
-    StepCounter_M->contStates->TransferFcn1_CSTATE  = (int16_t)((raw_gyroscope[3] << 8) | raw_gyroscope[2]);
-    StepCounter_M->contStates->TransferFcn2_CSTATE  = (int16_t)((raw_gyroscope[5] << 8) | raw_gyroscope[4]);
-    StepCounter_step(StepCounter_M, StepCounter_Y);
+        // Read sensor data from the IMU
+        IMU_ReadAccelerometerData(&accelerometer_data, raw_accelerometer);
+        IMU_ReadGyroscopeData(&gyroscope_data, raw_gyroscope);
 
-    step_count = StepCounter_Y->stepnumber;
+        // Send the accelerometer and gyroscope data via BLE
+        StepCounter_U.In1[0] = (double)gyroscope_data.x;
+        StepCounter_U.In1[1] = (double)gyroscope_data.y;
+        StepCounter_U.In1[2] = (double)gyroscope_data.z;
 
-    /* --- Read light sensor (every LIGHT_SUBSAMPLE ticks = 10 Hz) --- */
-    light_tick++;
-    if (light_tick >= LIGHT_SUBSAMPLE) {
-      light_tick = 0;
+        StepCounter_U.In2[0] = (double)accelerometer_data.x;
+        StepCounter_U.In2[1] = (double)accelerometer_data.y;
+        StepCounter_U.In2[2] = (double)accelerometer_data.z;
 
-      
-      /* Full spectrum: 12 channels (F1–F8, Clear, NIR) */
-      if (AS7341_ReadFullSpectrum(&spectrum)) {
-        /* Copy all 8 filter channels F1..F8 (indices 0..7 in spectrum) */
-        for (uint8_t i = 0; i < 8; i++) {
-          uint16_t v = spectrum.ch[i];
-          raw_light[2U * i]     = (uint8_t)(v & 0xFFU);
-          raw_light[2U * i + 1] = (uint8_t)(v >> 8);
-        }
-        
-        /* Clear and NIR: use two of the remaining channels. Adjust
-        * indices if you change SMUX mapping in as7341_driver.c. */
-        uint16_t clear = spectrum.ch[8];
-        uint16_t nir   = spectrum.ch[9];
-        raw_light[16] = (uint8_t)(clear & 0xFFU);
-        raw_light[17] = (uint8_t)(clear >> 8);
-        raw_light[18] = (uint8_t)(nir & 0xFFU);
-        raw_light[19] = (uint8_t)(nir >> 8);
-      }
-      
-      /* Flicker: use on-chip flicker engine to classify mains freq
-      * into {0, 50, 60} Hz equivalents. */
-      uint16_t mains_hz = AS7341_DetectMainsHz();
-      raw_light[20] = (uint8_t)(mains_hz & 0xFFU);
-      raw_light[21] = (uint8_t)(mains_hz >> 8);
-
-      /*
-            while (1) {
-    LED_Toggle(LED_RED);
-    HAL_Delay(5000);
-}
-    */
-      
-
-      /* --- BLE transmission (as7341) --- */
-      uint8_t raw_light_1[6];
-      uint8_t raw_light_2[6];
-      uint8_t raw_light_3[6];
-      uint8_t raw_light_4[6];
-
-      
-      for(int i=0; i<6; i++)
-      {
-        raw_light_1[i] = raw_light[i];
-        raw_light_2 [i]= raw_light[i+(6*1)];
-        raw_light_3[i] = raw_light[i+(6*2)];
-        if (i < 4)
-        {
-          raw_light_4[i] = raw_light[i+(6*3)];
-        }
-        else
-        {
-          raw_light_4[i] = 0;
-        }
-      }
-      
-
-      BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_1, raw_light_1);
-      BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_2, raw_light_2);
-      BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_3, raw_light_3);
-      BLE_SendPacket(DATA_TYPE_AS7341_SPECTRUM_4, raw_light_4);
-    }
-
-      /*----- Read microphone -----*/
-      
-
-      /* --- BLE transmission (IMU only, unchanged) --- */
-      
-      BLE_SendPacket(DATA_TYPE_IMU_ACCELERATION, raw_accelerometer);
-      BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, raw_gyroscope);
+        /* --- Read steps   ---*/
+        StepCounter_step();
+        step_count = StepCounter_Y.stepnumber - 1;
 
 
-        /* --- Timestamp @ 100 Hz --- */
-        timestamp.sss = tim * 10;
+        // Create timestamp with sampling frequency @100 Hz
+        timestamp.sss=tim*10;
 		if(timestamp.sss == 1000) {
-			timestamp.ss++;
-			timestamp.sss = 0;
+			timestamp.ss=timestamp.ss+1;
+			timestamp.sss= 0;
 			tim = 0;
-			if (timestamp.ss == 60){
-				timestamp.mm++;
-				timestamp.ss = 0;
-				if (timestamp.mm == 60){
-					timestamp.hh++;
-					timestamp.mm = 0;
+			if (timestamp.ss==60){
+				timestamp.mm=timestamp.mm+1;
+				timestamp.ss=0;
+				if (timestamp.mm==60){
+					timestamp.hh=timestamp.hh+1;
+					timestamp.mm=0;
 				}
 			}
 		}
+
 		tim++;
 
-		/* --- Pack and save to NAND (IMU + light) --- */
-		write_packet(sample, timestamp, raw_accelerometer, raw_gyroscope, raw_light, step_count, NAND_packet);
+		// Create the data packet to be saved in memory
+		write_packet(sample, timestamp, raw_accelerometer,raw_gyroscope, step_count, NAND_packet);
 		sample++;
+		// Write data packet in memory
         write_memory();
+
 	}
 }
 
+
+/**
+  * @brief  Callback function for external interrupt events (e.g., a button press).
+  * This function is triggered by the rising edge of the user button's signal.
+  * @param  GPIO_Pin: The pin that triggered the interrupt.
+  */
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == USER_BUTTON_Pin)
 	{
+		// A button press can trigger different state transitions depending on the current state.
 		switch(current_state) {
 			case STATE_IDLE:
+				// If the device is idle, start data acquisition.
 				erase_memory();
 				current_state = STATE_ACQUISITION;
-				HAL_TIM_Base_Start_IT(&htim2);
-				LED_On(LED_GREEN);
+				HAL_TIM_Base_Start_IT(&htim2); // Start the timer for periodic data reading
+				LED_On(LED_GREEN); // Provide visual feedback for starting acquisition
 			break;
 			case STATE_ACQUISITION:
+				// If data acquisition is active, stop it.
 				current_state = STATE_IDLE;
-				HAL_TIM_Base_Stop_IT(&htim2);
-				LED_Off(LED_GREEN);
+				HAL_TIM_Base_Stop_IT(&htim2); // Stop the timer
+				LED_Off(LED_GREEN); // Turn off the LED
 				break;
 			case STATE_USB_CONNECTED:
+				// If USB is connected, start the download process.
 				exit_flag = 0;
 				current_state = STATE_DOWNLOAD;
 				break;
 			default:
+				// Do nothing for other states (e.g., if button is pressed during DOWNLOAD).
 				break;
 		}
 	}
 }
 
+// Falling Edge when User Button is not pressed
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin == USER_BUTTON_Pin)
 	{
+
 	}
 }
 
 /* USER CODE END 4 */
 
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-  while (1) {}
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
