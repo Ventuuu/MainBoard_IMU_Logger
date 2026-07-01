@@ -95,15 +95,71 @@ void App_UpdateFactoryEraseLed(void);
 /* USER CODE BEGIN Private defines */
 #define I2C_TIMEOUT 100
 
-// This enum defines the possible states for the main application logic.
+/**
+ * @brief Main application state machine.
+ *
+ * Two mutually exclusive top-level workflows share these states:
+ *
+ * WORKFLOW A — BLE Live (mobile app connected)
+ * ------------------------------------------------
+ *   STATE_IDLE  ──(BLE connect detected)──►  STATE_BLE_LIVE
+ *   STATE_BLE_LIVE  ──(BLE disconnect)──►    STATE_IDLE
+ *
+ *   In STATE_BLE_LIVE:
+ *     - Sensors run continuously (IMU @ 100 Hz, light+mic @ 7 s epoch).
+ *     - Computed metrics are transmitted as live BLE packets on their
+ *       respective intervals (see ble_live_payload.h).
+ *     - NAND flash is NOT written.
+ *     - USER BUTTON is ignored.
+ *     - The legacy BLE sync (bulk download) is blocked.
+ *
+ * WORKFLOW B — Legacy Button-Driven (no app connection)
+ * -------------------------------------------------------
+ *   STATE_IDLE  ──(short press)──►  STATE_ACQUISITION
+ *                                       │
+ *                         (short press) ▼
+ *                               STATE_BLE_SYNC  (bulk NAND download)
+ *   STATE_IDLE  ──(USB connect)──►  STATE_USB_CONNECTED
+ *                                       │
+ *                         (short press) ▼
+ *                               STATE_DOWNLOAD  (VCP data export)
+ *   STATE_IDLE  ──(5 s hold)───►  STATE_FACTORY_ERASE
+ *
+ * A BLE connection event while in any legacy state is queued and acted
+ * upon only after that state returns to STATE_IDLE.
+ */
 typedef enum {
-    STATE_IDLE,          // The device is waiting for a command or event.
-    STATE_ACQUISITION,   // The device is actively collecting sensor data.
-    STATE_USB_CONNECTED, // The device is connected to a computer via USB.
-    STATE_DOWNLOAD,      // The device is in the process of downloading data.
-    STATE_BLE_SYNC,      // NAND synchronization over RN4871 Transparent UART.
-    STATE_FACTORY_ERASE  // User-requested secure reset of data and sync metadata.
+    STATE_IDLE,           /**< Waiting; BLE advertising in background.          */
+    STATE_ACQUISITION,    /**< Legacy: actively logging sensor data to NAND.    */
+    STATE_USB_CONNECTED,  /**< Legacy: USB VCP connected.                       */
+    STATE_DOWNLOAD,       /**< Legacy: streaming NAND pages over USB VCP.       */
+    STATE_BLE_SYNC,       /**< Legacy: bulk NAND page download over BLE UART.   */
+    STATE_FACTORY_ERASE,  /**< Legacy: erasing all NAND data + BLE sync metadata.*/
+    STATE_BLE_LIVE        /**< BLE Live: continuous sensor read + live packets. */
 } AppState;
+
+/**
+ * @brief  Set by the BLE transparent-UART receive callback when the RN4871
+ *         signals a connection (status string "CONNECT" received on UART).
+ *         Cleared when "DISCONNECT" is received or when the connection-lost
+ *         watchdog fires.
+ *
+ * Written only from: BLE UART RX interrupt / BleConnection_Process().
+ * Read from:         main-loop workflow arbiter.
+ *
+ * @note   Declared volatile because it is shared between ISR and main-loop.
+ */
+extern volatile uint8_t ble_connected;
+
+/**
+ * @brief  Set to 1 while STATE_BLE_LIVE is the active workflow.
+ *         Guards sensor start/stop and NAND write inhibit logic.
+ *
+ * Written only from: main-loop workflow arbiter.
+ * Read from:         ProcessSensorTick, AudioScheduler, NAND append paths.
+ */
+extern volatile uint8_t ble_live_mode_active;
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
