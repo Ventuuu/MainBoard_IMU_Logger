@@ -16,7 +16,7 @@
  *  While active:
  *   - IMU metrics packet (BleLiveImuPayload)  sent every BLE_LIVE_IMU_INTERVAL_MS.
  *   - Light packet       (BleLiveLightPayload) sent every BLE_LIVE_ENV_INTERVAL_MS
- *                         only when exposure_class or intensity has changed.
+ *                         only when exposure_class or blue_clear_ratio has changed.
  *   - Mic packet         (BleLiveMicPayload)   sent every BLE_LIVE_ENV_INTERVAL_MS
  *                         only when environment_class or laeq_x10 has changed.
  *   - NAND flash is NOT written.
@@ -117,23 +117,26 @@ typedef struct __attribute__((packed))
 } BleLiveImuPayload;
 
 /**
- * @brief Light / spectral metrics packet — 3 bytes.
+ * @brief Light / spectral metrics packet - 4 bytes.
  *
  * Sent every BLE_LIVE_ENV_INTERVAL_MS, **only** when exposure_class or
- * light_color_intensity has changed since the last transmission.
+ * blue_clear_ratio has changed since the last transmission.
  *
- * | Off | Sz | Field                 | Notes                               |
- * |-----|----|-----------------------|-------------------------------------|
- * |  0  |  1 | msg_type              | BLE_MSG_LIGHT_METRICS (0x51)        |
- * |  1  |  1 | exposure_class        | BleLiveLightExposureClass           |
- * |  2  |  1 | light_color_intensity | Normalised 0–255 (clear channel)    |
+ * | Off | Sz | Field            | Notes                               |
+ * |-----|----|------------------|-------------------------------------|
+ * |  0  |  1 | msg_type         | BLE_MSG_LIGHT_METRICS (0x51)        |
+ * |  1  |  1 | exposure_class   | BleLiveLightExposureClass           |
+ * |  2  |  2 | blue_clear_ratio | Blue / Clear ratio, scaled by 10000 |
  */
 typedef struct __attribute__((packed))
 {
-    uint8_t msg_type;               /**< BLE_MSG_LIGHT_METRICS            */
-    uint8_t exposure_class;         /**< BleLiveLightExposureClass        */
-    uint8_t light_color_intensity;  /**< 0–255 normalised clear channel   */
+    uint8_t  msg_type;          /**< BLE_MSG_LIGHT_METRICS              */
+    uint8_t  exposure_class;    /**< BleLiveLightExposureClass          */
+    uint16_t blue_clear_ratio;  /**< Blue / Clear ratio, scaled by 10000 */
 } BleLiveLightPayload;
+
+_Static_assert(sizeof(BleLiveLightPayload) == 4U,
+               "Unexpected BleLiveLightPayload size");
 
 /**
  * @brief Microphone / audio environment metrics packet — 4 bytes.
@@ -311,13 +314,13 @@ void BLE_Live_TryNotifyImu(uint32_t now_ms,
  *
  * @param  now_ms        Current HAL_GetTick() value.
  * @param  exp_class     Latest light exposure class.
- * @param  intensity     Latest normalised clear-channel intensity (0–255).
+ * @param  blue_clear_ratio Latest Blue / Clear ratio, scaled by 10000.
  * @param  env_class     Latest audio environment class.
  * @param  laeq_x10      Latest LAeq × 10 value.
  */
 void BLE_Live_TryNotifyEnv(uint32_t             now_ms,
                            BleLiveLightExposureClass exp_class,
-                           uint8_t              intensity,
+                           uint16_t             blue_clear_ratio,
                            BleLiveEnvClass      env_class,
                            uint16_t             laeq_x10);
 

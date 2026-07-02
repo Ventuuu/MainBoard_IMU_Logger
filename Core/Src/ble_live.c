@@ -74,7 +74,7 @@ static uint32_t s_watchdog_last_activity_ms = 0U;
 
 /* Cached last-sent values for change-gating (env packets) */
 static uint8_t  s_last_exposure_class   = 0xFFU;  /* invalid sentinel       */
-static uint8_t  s_last_intensity        = 0xFFU;
+static uint16_t s_last_blue_clear_ratio = 0xFFFFU;
 static uint8_t  s_last_env_class        = 0xFFU;
 static uint16_t s_last_laeq_x10        = 0xFFFFU;
 
@@ -199,7 +199,7 @@ void BLE_Live_TryNotifyImu(uint32_t         now_ms,
  */
 void BLE_Live_TryNotifyEnv(uint32_t              now_ms,
                            BleLiveLightExposureClass exp_class,
-                           uint8_t               intensity,
+                           uint16_t              blue_clear_ratio,
                            BleLiveEnvClass        env_class,
                            uint16_t              laeq_x10)
 {
@@ -215,17 +215,17 @@ void BLE_Live_TryNotifyEnv(uint32_t              now_ms,
 
     /* Light packet — change-gated */
     if (((uint8_t)exp_class != s_last_exposure_class) ||
-        (intensity           != s_last_intensity))
+        (blue_clear_ratio    != s_last_blue_clear_ratio))
     {
         BleLiveLightPayload lpkt;
-        lpkt.msg_type              = BLE_MSG_LIGHT_METRICS;
-        lpkt.exposure_class        = (uint8_t)exp_class;
-        lpkt.light_color_intensity = intensity;
+        lpkt.msg_type         = BLE_MSG_LIGHT_METRICS;
+        lpkt.exposure_class   = (uint8_t)exp_class;
+        lpkt.blue_clear_ratio = blue_clear_ratio;
 
         Live_SendPacket((const uint8_t *)&lpkt, (uint16_t)sizeof(lpkt));
 
-        s_last_exposure_class = (uint8_t)exp_class;
-        s_last_intensity      = intensity;
+        s_last_exposure_class   = (uint8_t)exp_class;
+        s_last_blue_clear_ratio = blue_clear_ratio;
     }
 
     /* Mic packet — change-gated */
@@ -322,7 +322,7 @@ static void Live_ResetSessionState(void)
     s_watchdog_last_activity_ms   = 0U;
     s_step_count_base             = 0U;
     s_last_exposure_class         = 0xFFU;
-    s_last_intensity              = 0xFFU;
+    s_last_blue_clear_ratio       = 0xFFFFU;
     s_last_env_class              = 0xFFU;
     s_last_laeq_x10               = 0xFFFFU;
 }

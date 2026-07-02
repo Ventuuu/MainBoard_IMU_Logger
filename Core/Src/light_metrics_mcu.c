@@ -19,6 +19,14 @@
 
 #define LIGHT_CHANNEL_COUNT 10U
 #define LIGHT_SIGNATURE_CHANNEL_COUNT 9U
+#define LIGHT_BLUE_CHANNEL_INDEX LIGHT_CH_F3
+
+_Static_assert(sizeof(LightSensorResultRecord) == AS7341_LIGHT_RESULT_RECORD_BYTES,
+               "Unexpected LightSensorResultRecord size");
+_Static_assert(offsetof(LightSensorResultRecord, blue_clear_ratio) == 36U,
+               "Unexpected blue_clear_ratio offset");
+_Static_assert(offsetof(LightSensorResultRecord, light_level_class) == 38U,
+               "Unexpected light_level_class offset");
 
 typedef enum
 {
@@ -209,6 +217,14 @@ void LightMetrics_FinalizeSession(LightSensorResultRecord *result)
     light_compute_means(mean);
     result->clear_mean_counts = mean[LIGHT_CH_CLEAR];
     result->light_level_class = (uint8_t)AS7341_ClassifyAmbientLight(mean[LIGHT_CH_CLEAR]);
+
+    if (mean[LIGHT_CH_CLEAR] != 0U)
+    {
+        result->blue_clear_ratio =
+            (uint16_t)((((uint64_t)mean[LIGHT_BLUE_CHANNEL_INDEX] * AS7341_NORMALIZATION_SCALE) +
+                        (mean[LIGHT_CH_CLEAR] / 2U)) /
+                       mean[LIGHT_CH_CLEAR]);
+    }
 
     for (uint8_t i = 0U; i < LIGHT_SIGNATURE_CHANNEL_COUNT; i++)
     {

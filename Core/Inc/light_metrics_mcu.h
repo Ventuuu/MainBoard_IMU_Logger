@@ -32,6 +32,7 @@ typedef struct
     uint32_t sample_count;
     uint32_t acquisition_duration_ms;
     uint32_t session_start_ms;
+    uint16_t blue_clear_ratio;
     uint8_t light_level_class;
 } LightSensorResultRecord;
 
