@@ -42,7 +42,7 @@
 #include "ble_sync.h"
 #include "as7341_driver.h"
 #include "as7341_processing_config.h"
-
+#include "StepCounter.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -460,7 +460,7 @@ static IMU_Data gyroscope_data;
 
 uint8_t raw_accelerometer[6] = {0};
 uint8_t raw_gyroscope[6]     = {0};
-
+uint8_t step_count = 0;
 /*
  * raw_light layout (22 bytes):
  *   Legacy AS7341 area in the 40-byte IMU record. The raw-count pipeline keeps
@@ -1313,11 +1313,11 @@ static AudioEnvironmentClass Audio_ClassifyEnvironment(double estimated_laeq_dba
         return AUDIO_ENV_UNAVAILABLE;
     }
 
-    if (estimated_laeq_dba < 35.0) return AUDIO_ENV_VERY_QUIET;
+    if (estimated_laeq_dba < 40.0) return AUDIO_ENV_VERY_QUIET;
     if (estimated_laeq_dba < 45.0) return AUDIO_ENV_QUIET;
     if (estimated_laeq_dba < 55.0) return AUDIO_ENV_MODERATE;
     if (estimated_laeq_dba < 65.0) return AUDIO_ENV_LIVELY;
-    if (estimated_laeq_dba < 75.0) return AUDIO_ENV_NOISY;
+    if (estimated_laeq_dba < 70.0) return AUDIO_ENV_NOISY;
     if (estimated_laeq_dba < 85.0) return AUDIO_ENV_VERY_NOISY;
 
     return AUDIO_ENV_HIGH_EXPOSURE;
@@ -2232,7 +2232,8 @@ static void ProcessSensorTick(uint32_t sample_tick_ms)
     if (IMU_ReadCombinedData(&accelerometer_data,
                              &gyroscope_data,
                              raw_accelerometer,
-                             raw_gyroscope) == 0U)
+                             raw_gyroscope,
+                             &step_count) == 0U)
     {
         imu_missed_samples++;
         return;
@@ -2248,6 +2249,7 @@ static void ProcessSensorTick(uint32_t sample_tick_ms)
                                       timestamp,
                                       raw_accelerometer,
                                       raw_gyroscope,
+                                      &step_count,
                                       raw_light) != LOG_OK)
     {
         nand_write_error_count++;
@@ -2529,6 +2531,8 @@ MX_SPI3_Init();
   if(IMU_Init() == 1) {
     IMU_ConfigAccelerometer(ACC_ODR_104HZ, ACC_FS_2G, 1);
     IMU_ConfigGyroscope(GYR_ODR_104HZ, GYR_FS_250DPS, 1);
+    // step counter initialization
+    StepCounter_initialize();
     if (IMU_EnableCoherentReads() == 0U)
     {
       Error_Handler();

@@ -12,6 +12,7 @@
 #include "stdint.h"
 #include "main.h"
 
+#define DEG2RAD 0.01745329252f
 // --- I2C Communication Settings ---
 // The I2C slave address of the LSM6DSO16IS is 0x6B (7-bit format).
 // This is the address to be used with the HAL library functions.
@@ -112,7 +113,8 @@ uint8_t IMU_EnableCoherentReads(void);
 uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
                              IMU_Data *gyro_data,
                              uint8_t *raw_accelerometer,
-                             uint8_t *raw_gyroscope);
+                             uint8_t *raw_gyroscope,
+                             uint8_t *step_count);
 
 /**
  * @brief Reads the raw and converted accelerometer data.

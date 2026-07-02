@@ -104,15 +104,13 @@
  * | Off | Sz | Field          | Notes                                    |
  * |-----|----|----------------|------------------------------------------|
  * |  0  |  1 | msg_type       | BLE_MSG_IMU_METRICS (0x50)               |
- * |  1  |  4 | step_count     | Cumulative steps since live-mode entry   |
- * |  5  |  1 | activity_state | BleLiveActivityState                     |
- * |  6  |  1 | reserved       | Always 0x00; reserved for future flags   |
+ * |  1  |  1 | step_count     | Cumulative steps since live-mode entry   |
+ * |  2  |  1 | reserved       | Always 0x00; reserved for future flags   |
  */
 typedef struct __attribute__((packed))
 {
     uint8_t  msg_type;        /**< BLE_MSG_IMU_METRICS                  */
-    uint32_t step_count;      /**< Little-endian cumulative step count  */
-    uint8_t  activity_state;  /**< BleLiveActivityState                 */
+    uint8_t  step_count;      /**< Cumulative step count                */
     uint8_t  reserved;        /**< Must be 0x00                         */
 } BleLiveImuPayload;
 
@@ -178,14 +176,6 @@ typedef struct __attribute__((packed))
  * Enumeration types
  * ----------------------------------------------------------------------- */
 
-/** Activity classification derived from IMU step-count delta and variance. */
-typedef enum
-{
-    BLE_ACTIVITY_UNKNOWN    = 0x00,  /**< Insufficient data to classify    */
-    BLE_ACTIVITY_STATIONARY = 0x01,  /**< No significant movement          */
-    BLE_ACTIVITY_WALKING    = 0x02,  /**< Moderate cadence                 */
-    BLE_ACTIVITY_RUNNING    = 0x03,  /**< High cadence / step rate         */
-} BleLiveActivityState;
 
 /** Light exposure classification (mirrors LightExposureClass in main.c). */
 typedef enum
@@ -303,8 +293,7 @@ void BLE_Live_OnDisconnected(uint32_t now_ms);
  * @param  activity      Latest activity classification.
  */
 void BLE_Live_TryNotifyImu(uint32_t now_ms,
-                           uint32_t step_count,
-                           BleLiveActivityState activity);
+                           uint8_t step_count);
 
 /**
  * @brief  Attempt to transmit light and mic packets if the epoch has elapsed

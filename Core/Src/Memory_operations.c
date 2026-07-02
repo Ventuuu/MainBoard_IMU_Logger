@@ -1372,6 +1372,7 @@ LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,
                                         Time_Struct timestamp,
                                         const uint8_t *accelerometer,
                                         const uint8_t *gyroscope,
+                                        const uint8_t *step_count,
                                         const uint8_t *light_raw)
 {
     uint32_t timestamp_ms;
@@ -1424,6 +1425,7 @@ LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,
                  (uint8_t *)accelerometer,
                  (uint8_t *)gyroscope,
                  (uint8_t *)light_raw,
+                 (uint8_t *)step_count,
                  &logger->sensor_page_buffer[LOG_HEADER_SIZE_BYTES]);
 
     logger->sensor_records_in_page++;
@@ -2486,6 +2488,7 @@ void write_packet(uint16_t sample_index,
                   uint8_t *accelerometer,
                   uint8_t *gyroscope,
                   uint8_t *light_raw,
+                  uint8_t *step_count,
                   uint8_t *packet_buffer)
 {
     uint16_t base;
@@ -2529,9 +2532,7 @@ void write_packet(uint16_t sample_index,
     {
         packet_buffer[base + 17U + i] = light_raw[i];
     }
-
-    /* Reserved byte */
-    packet_buffer[base + 39U] = 0x00U;
+	packet_buffer[base + 39U] = *step_count;
 }
 
 

@@ -167,8 +167,7 @@ void BLE_Live_Process(uint32_t now_ms)
  *        elapsed since the last transmission.
  */
 void BLE_Live_TryNotifyImu(uint32_t         now_ms,
-                           uint32_t         step_count,
-                           BleLiveActivityState activity)
+                           uint8_t         step_count)
 {
     BleLiveImuPayload pkt;
 
@@ -186,7 +185,6 @@ void BLE_Live_TryNotifyImu(uint32_t         now_ms,
     pkt.step_count     = (step_count >= s_step_count_base)
                          ? (step_count - s_step_count_base)
                          : step_count;
-    pkt.activity_state = (uint8_t)activity;
     pkt.reserved       = 0x00U;
 
     Live_SendPacket((const uint8_t *)&pkt, (uint16_t)sizeof(pkt));
