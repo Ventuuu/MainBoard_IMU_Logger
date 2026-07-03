@@ -63,6 +63,7 @@
 #include "imu_driver.h"
 #include "bluetooth.h"
 #include "ble_sync.h"
+#include "ble_live_payload.h"
 #include "as7341_driver.h"
 #include "as7341_processing_config.h"
 #include "StepCounter.h"
@@ -495,7 +496,7 @@ static IMU_Data gyroscope_data;
 
 uint8_t raw_accelerometer[6] = {0};
 uint8_t raw_gyroscope[6]     = {0};
-uint8_t step_count = 0;
+uint16_t step_count = 0;
 /*
  * raw_light layout (22 bytes):
  *   Legacy AS7341 area in the 40-byte IMU record. The raw-count pipeline keeps
@@ -1057,7 +1058,9 @@ static void SensorPhase_TrySendStepBle(uint32_t now_ms)
     }
 
     last_step_ble_tx_ms = now_ms;
-    // TODO: replace with real BLE live step notification call.
+    // The actual call that sends the 0x50 packet to the phone:
+    BLE_Live_TryNotifyImu(now_ms, step_count);
+
 }
 
 static void SensorPhase_EnterEnvStart(uint32_t now_ms)

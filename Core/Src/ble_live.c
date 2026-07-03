@@ -167,7 +167,7 @@ void BLE_Live_Process(uint32_t now_ms)
  *        elapsed since the last transmission.
  */
 void BLE_Live_TryNotifyImu(uint32_t         now_ms,
-                           uint8_t         step_count)
+                           uint16_t        step_count)
 {
     BleLiveImuPayload pkt;
 

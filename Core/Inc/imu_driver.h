@@ -114,7 +114,7 @@ uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
                              IMU_Data *gyro_data,
                              uint8_t *raw_accelerometer,
                              uint8_t *raw_gyroscope,
-                             uint8_t *step_count);
+                             uint16_t *step_count);
 
 /**
  * @brief Reads the raw and converted accelerometer data.
