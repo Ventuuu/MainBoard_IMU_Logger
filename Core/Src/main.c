@@ -631,6 +631,7 @@ static void LightMeasurement_Finalize(uint8_t measurement_valid);
 static void AudioRing_Reset(void);
 static void MicrophoneClock_Enable(void);
 static void MicrophoneClock_Disable(void);
+static void MicDiagnostics_UpdateErrorCodes(void);
 static uint32_t AudioRing_Count(void);
 static void AudioRing_EnqueueFromIsr(const int16_t *samples);
 static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms);
@@ -3147,6 +3148,11 @@ MX_SPI3_Init();
           }  
 
           break;
+          
+          case STATE_BLE_LIVE:
+            /* Live mode sensor superframe is serviced above the switch.
+            * No additional per-state action required here. */
+            break;
 
           case STATE_USB_CONNECTED:
           if (download_requested)
