@@ -4,22 +4,45 @@
   * @file           : main.c
   * @brief          : Main application file for MainBoard_IMU_Logger project.
   ******************************************************************************
-  * @functionality  : This firmware implements a complete Data Logger for the on board IMU
-  *                   and the AS7341 spectral light sensor.
-  * @details        : The application operates using a State Machine triggered by a
-  * single USER BUTTON. It performs three primary tasks:
- * 1. Real-time Acquisition: Reads Accelerometer/Gyroscope data from the LSM6DSO16IS
- *    via I2C at 100 Hz (TIM2), and stores raw AS7341 samples as LRAW pages
- *    outside interrupt context.
-  * 2. Wireless Transmission: Sends data packets via Bluetooth Low Energy (BLE)
-  *    using the UART interface.
-  * 3. Data Logging: Saves acquired data to NAND Flash memory.
+  * @functionality  : This firmware manages sensing, BLE streaming, and NAND logging
+  *                   for a wearable node built around the LSM6DSO16IS IMU,
+  *                   the AS7341 light sensor, and the digital microphone path.
   *
-  * Saved data can be downloaded via a USB Virtual COM Port (VCP)
-  * connection, also initiated by the USER BUTTON.
+  * @details        : The application supports two acquisition workflows:
   *
-  * @intended_use   : Starting template for Smart Wearables Course
-  * exploring IMU/light sensor interfacing, BLE communication, and memory management.
+  *                   1. Legacy workflow (button-controlled):
+  *                      - Preserves the original user-button state machine.
+  *                      - Runs the scheduled acquisition/logging pipeline.
+  *                      - Captures IMU, microphone, and light data.
+  *                      - Stores records to NAND Flash memory.
+  *                      - Supports BLE synchronization and USB download.
+  *
+  *                   2. Live workflow (mobile-app controlled):
+  *                      - Runs only when requested by the mobile app.
+  *                      - Uses a 7 s superframe split into:
+  *                          a) 300 ms environmental window:
+  *                             microphone + light active, IMU processing off
+  *                          b) 6700 ms motion window:
+  *                             IMU active for step counting, light/mic off
+  *                          c) 300 ms environmental window:
+  *                             microphone + light active, IMU processing off
+  *                      - Streams live metrics over BLE.
+  *                      - Keeps the legacy workflow untouched and separate.
+  *
+  *                   Sensor timing is driven from TIM2. Time-critical sampling is
+  *                   kept lightweight in interrupt context, while heavier processing,
+  *                   BLE handling, light post-processing, and storage operations are
+  *                   performed in the main loop.
+  *
+  *                   The firmware also supports:
+  *                      - BLE synchronization of logged data
+  *                      - USB VCP download of stored NAND records
+  *                      - Factory erase through a long user-button press
+  *                      - State LED feedback for the active operating mode
+  *
+  * @intended_use   : Firmware foundation for the Smart Wearables Course,
+  *                   demonstrating embedded acquisition scheduling, multimodal
+  *                   sensing, BLE communication, and flash-backed data logging.
   ******************************************************************************
   */
 /* USER CODE END Header */
