@@ -20,6 +20,9 @@ extern I2C_HandleTypeDef hi2c3;
 static uint8_t accelerometer_full_scale;
 static uint8_t gyroscope_full_scale;
 
+static inline float imu_acc_sensitivity_fs2g(void) { return 2.0f / 32767.0f; }
+static inline float imu_gyro_sensitivity_175lsb_dps(void) { return 1.0f / 175.0f; }
+
 // --- Private Function Prototypes (Helper Functions) ---
 // These functions are only used internally by the driver
 static uint8_t imu_read_register(uint8_t reg_addr, uint8_t* data, uint16_t data_len);
@@ -128,6 +131,8 @@ uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
     int16_t gyro_y;
     int16_t gyro_z;
 
+    const float acc_sensitivity = imu_acc_sensitivity_fs2g();
+    const float gyro_sensitivity = imu_gyro_sensitivity_175lsb_dps();
 
     if ((acc_data == NULL) || (gyro_data == NULL) ||
         (raw_accelerometer == NULL) || (raw_gyroscope == NULL)) {
@@ -148,29 +153,26 @@ uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
     acc_x = (int16_t)(((uint16_t)raw[7] << 8U) | raw[6]);
     acc_y = (int16_t)(((uint16_t)raw[9] << 8U) | raw[8]);
     acc_z = (int16_t)(((uint16_t)raw[11] << 8U) | raw[10]);
-
-    float acc_sensitivity = 2.0 / 32767.0;
-    float gyro_sensitivity = 1.0 / 175.0;
     
-    gyro_data->x = (double)gyro_x * DEG2RAD * gyro_sensitivity;
-    gyro_data->y = (double)gyro_y * DEG2RAD * gyro_sensitivity;
-    gyro_data->z = (double)gyro_z * DEG2RAD * gyro_sensitivity;
-    acc_data->x = (double)acc_x * 9.81f * acc_sensitivity;
-    acc_data->y = (double)acc_y * 9.81f * acc_sensitivity;
-    acc_data->z = (double)acc_z * 9.81f * acc_sensitivity;
+    gyro_data->x = (float)gyro_x * (float)DEG2RAD * gyro_sensitivity;
+    gyro_data->y = (float)gyro_y * (float)DEG2RAD * gyro_sensitivity;
+    gyro_data->z = (float)gyro_z * (float)DEG2RAD * gyro_sensitivity;
+    acc_data->x = (float)acc_x * 9.81f * acc_sensitivity;
+    acc_data->y = (float)acc_y * 9.81f * acc_sensitivity;
+    acc_data->z = (float)acc_z * 9.81f * acc_sensitivity;
 
     // Send the accelerometer and gyroscope data via BLE
-    StepCounter_U.In1[0] = (double)gyro_data->x;
-    StepCounter_U.In1[1] = (double)gyro_data->y;
-    StepCounter_U.In1[2] = (double)gyro_data->z;
+    StepCounter_U.In1[0] = (real_T)(float)gyro_data->x;
+    StepCounter_U.In1[1] = (real_T)(float)gyro_data->y;
+    StepCounter_U.In1[2] = (real_T)(float)gyro_data->z;
 
-    StepCounter_U.In2[0] = (double)acc_data->x;
-    StepCounter_U.In2[1] = (double)acc_data->y;
-    StepCounter_U.In2[2] = (double)acc_data->z;
+    StepCounter_U.In2[0] = (real_T)(float)acc_data->x;
+    StepCounter_U.In2[1] = (real_T)(float)acc_data->y;
+    StepCounter_U.In2[2] = (real_T)(float)acc_data->z;
 
     /* --- Read steps   ---*/
     StepCounter_step();
-    *step_count = StepCounter_Y.stepnumber - 1;
+    *step_count = (uint8_t)((StepCounter_Y.stepnumber > 0U) ? (StepCounter_Y.stepnumber - 1U) : 0U);
 
     return 1U;
 }
