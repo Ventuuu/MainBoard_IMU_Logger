@@ -66,12 +66,6 @@
 #include "as7341_driver.h"
 #include "as7341_processing_config.h"
 #include "StepCounter.h"
-
-// Refactored Modules
-#include "app_audio.h"
-#include "app_state_ui.h"
-#include "app_sensor_workflow.h"
-#include "app_system_ops.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -703,70 +697,964 @@ static Time_Struct Time_FromElapsedMilliseconds(uint32_t elapsed_ms)
     return t;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+static void UserButton_HandleShortPress(AppState pressed_state)
+{
+    button_short_press_count++;
+
+    switch (pressed_state)
+    {
+        case STATE_IDLE:
+        case STATE_ACQUISITION:
+            ble_sync_requested = 1U;
+            break;
+
+        case STATE_BLE_SYNC:
+            if (ble_sync_active != 0U)
+            {
+                ble_sync_abort_requested = 1U;
+            }
+            break;
+
+        case STATE_USB_CONNECTED:
+            exit_flag = 0;
+            download_requested = 1U;
+            download_request_count++;
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void UserButton_Process(uint32_t now_ms)
+{
+    GPIO_PinState pin_state;
+
+    if ((factory_erase_in_progress != 0U) ||
+        (user_button_pressed == 0U))
+    {
+        return;
+    }
+
+    if (user_button_press_state == STATE_IDLE)
+    {
+        start_acquisition_requested = 0U;
+        ble_sync_requested = 0U;
+    }
+
+    pin_state = HAL_GPIO_ReadPin(USER_BUTTON_GPIO_Port, USER_BUTTON_Pin);
+    if ((pin_state == GPIO_PIN_RESET) &&
+        ((now_ms - user_button_last_event_ms) >= USER_BUTTON_DEBOUNCE_MS))
+    {
+        if ((user_button_long_press_triggered == 0U) &&
+            ((now_ms - user_button_press_start_ms) >= USER_BUTTON_LONG_PRESS_MS) &&
+            (user_button_press_state == STATE_IDLE) &&
+            (current_state == STATE_IDLE) &&
+            (usb_flag == 0U) &&
+            (ble_sync_active == 0U) &&
+            (microphone_active == 0U))
+        {
+            user_button_long_press_triggered = 1U;
+            factory_erase_requested = 1U;
+            button_long_press_count++;
+            factory_erase_request_count++;
+        }
+
+        AppState pressed_state = user_button_press_state;
+        uint8_t long_press_triggered = user_button_long_press_triggered;
+
+        user_button_pressed = 0U;
+        user_button_release_pending = 0U;
+        user_button_long_press_triggered = 0U;
+        user_button_press_start_ms = 0U;
+        user_button_press_state = STATE_IDLE;
+        user_button_last_event_ms = now_ms;
+
+        if (long_press_triggered == 0U)
+        {
+            UserButton_HandleShortPress(pressed_state);
+        }
+        return;
+    }
+
+    if ((pin_state == GPIO_PIN_SET) &&
+        (user_button_release_pending != 0U))
+    {
+        user_button_release_pending = 0U;
+    }
+
+    if ((user_button_long_press_triggered == 0U) &&
+        ((now_ms - user_button_press_start_ms) >= USER_BUTTON_LONG_PRESS_MS) &&
+        (user_button_press_state == STATE_IDLE) &&
+        (current_state == STATE_IDLE) &&
+        (usb_flag == 0U) &&
+        (ble_sync_active == 0U) &&
+        (microphone_active == 0U))
+    {
+        user_button_long_press_triggered = 1U;
+        factory_erase_requested = 1U;
+        button_long_press_count++;
+        factory_erase_request_count++;
+    }
+}
+
+static int SmartWearable_FactoryEraseNand(void)
+{
+    uint32_t erase_start_ms = HAL_GetTick();
+    LogStatus logger_status;
+
+    if ((current_state != STATE_IDLE) || (usb_flag != 0U) ||
+        (ble_sync_active != 0U))
+    {
+        factory_erase_requested = 0U;
+        factory_erase_rejected_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_NOT_IDLE;
+        return 1;
+    }
+
+    factory_erase_requested = 0U;
+    factory_erase_in_progress = 1U;
+    factory_erase_attempt_count++;
+    factory_erase_last_error = FACTORY_ERASE_ERROR_NONE;
+    factory_erase_duration_ms = 0U;
+
+    start_acquisition_requested = 0U;
+    stop_acquisition_requested = 0U;
+    download_requested = 0U;
+    ble_sync_requested = 0U;
+    ble_sync_abort_requested = 0U;
+    sensor_tick_pending = 0U;
+    light_measurement_pending = 0U;
+    acquisition_paused_for_ble_sync = 1U;
+    audio_accept_chunks = 0U;
+
+    current_state = STATE_FACTORY_ERASE;
+    state_led_initialized = 0U;
+    UpdateStateLed(current_state);
+    HAL_TIM_Base_Stop_IT(&htim2);
+
+    if (microphone_active != 0U)
+    {
+        if (HAL_MDF_AcqStop_DMA(&MdfHandle0) != HAL_OK)
+        {
+            factory_erase_failure_count++;
+            factory_erase_last_error = FACTORY_ERASE_ERROR_MDF_STOP;
+            return -1;
+        }
+        microphone_active = 0U;
+        mic_active = 0U;
+    }
+    MicrophoneClock_Disable();
+
+    AudioRing_Reset();
+    audio_window_pcm_samples = 0U;
+
+    logger_status = NANDLogger_DiscardPendingBuffers(&nand_logger);
+    if (logger_status != LOG_OK)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_BUFFER_DISCARD;
+        return -1;
+    }
+
+    logger_status = NANDLogger_EraseAllGoodBlocks(&nand_logger);
+    if (logger_status != LOG_OK)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_DATA_ERASE;
+        return -1;
+    }
+
+    logger_status = NANDLogger_Recover(&nand_logger);
+    if (logger_status != LOG_OK)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error = FACTORY_ERASE_ERROR_DATA_RECOVERY;
+        return -1;
+    }
+
+    if (BleSync_FactoryReset(&nand_logger) != 0)
+    {
+        factory_erase_failure_count++;
+        factory_erase_last_error =
+                (ble_sync_last_error == BLE_SYNC_ERROR_UART) ?
+                FACTORY_ERASE_ERROR_BLE_UART :
+                FACTORY_ERASE_ERROR_BLE_METADATA;
+        return -1;
+    }
+
+    current_window_sequence = 0U;
+    next_window_sequence = nand_recovered_next_window_sequence;
+    audio_scheduler_first_deadline_ms = HAL_GetTick() + AUDIO_WINDOW_PERIOD_MS;
+    audio_scheduler_next_deadline_ms = audio_scheduler_first_deadline_ms;
+    audio_scheduler_last_busy_interval_valid = 0U;
+    acquisition_paused_for_ble_sync = 0U;
+    acquisition_timebase_ms = HAL_GetTick();
+    imu_next_sample_tick_ms = acquisition_timebase_ms + IMU_SAMPLE_PERIOD_MS;
+    sensor_tick_pending = 0U;
+    (void)HAL_TIM_Base_Start_IT(&htim2);
+
+    factory_erase_duration_ms = HAL_GetTick() - erase_start_ms;
+    factory_erase_completed_count++;
+    factory_erase_in_progress = 0U;
+    current_state = STATE_IDLE;
+    state_led_initialized = 0U;
+    UpdateStateLed(current_state);
+
+    return 0;
+}
+
+
+static void SensorPhase_StartMicWindow(void)
+{
+HAL_StatusTypeDef start_status;
+
+if (microphone_active != 0U)
+{
+    return;
+}
+
+memset((void *)&mic_diag, 0, sizeof(mic_diag));
+mic_diag.audio_window_target_samples = AUDIO_WINDOW_TARGET_SAMPLES;
+mic_diag.session_start_tick_ms = HAL_GetTick();
+audio_software_warmup_remaining = AUDIO_SOFTWARE_WARMUP_SAMPLES;
+audio_diag_pcm_sample_rate_hz = AUDIO_SAMPLE_RATE_HZ;
+audio_diag_target_valid_samples = AUDIO_WINDOW_TARGET_SAMPLES;
+audio_diag_captured_samples = AUDIO_HARDWARE_WARMUP_SAMPLES;
+audio_diag_valid_samples = 0U;
+audio_diag_warmup_target_samples = AUDIO_WARMUP_SAMPLES;
+audio_diag_warmup_discarded_samples = AUDIO_HARDWARE_WARMUP_SAMPLES;
+audio_diag_dma_half_callbacks = 0U;
+audio_diag_dma_full_callbacks = 0U;
+audio_diag_stale_callbacks = 0U;
+audio_diag_ring_overflows = 0U;
+audio_diag_ring_max_occupancy = 0U;
+audio_diag_first_valid_sample = 0;
+audio_diag_last_valid_sample = 0;
+audio_diag_pcm_crc32 = 0U;
+audio_diag_rms_z_dbfs = 0.0;
+audio_diag_rms_a_dbfs = 0.0;
+audio_diag_peak_dbfs = 0.0;
+audio_diag_laeq_dba = 0.0;
+audio_diag_environment_class = AUDIO_ENV_UNAVAILABLE;
+audio_diag_mdf_start_count = 0U;
+audio_diag_mdf_stop_count = 0U;
+audio_diag_start_failures = 0U;
+audio_diag_stop_failures = 0U;
+audio_window_pcm_samples = 0U;
+AudioRing_Reset();
+mic_capture_samples = AUDIO_HARDWARE_WARMUP_SAMPLES;
+mic_valid_samples = 0U;
+mic_warmup_samples_discarded = AUDIO_HARDWARE_WARMUP_SAMPLES;
+
+mic_dma_config.Address = (uint32_t)audio_dma_buffer;
+mic_dma_config.DataLength = AUDIO_DMA_BUFFER_SAMPLES * sizeof(int16_t);
+mic_dma_config.MsbOnly = ENABLE;
+
+MicrophoneClock_Enable();
+audio_accept_chunks = 1U;
+mic_diag.dma_start_attempt_count++;
+mic_diag.last_dma_start_tick_ms = HAL_GetTick();
+
+start_status = HAL_MDF_AcqStart_DMA(&MdfHandle0,
+&MdfFilterConfig0,
+&mic_dma_config);
+
+mic_diag.last_dma_start_status = (int32_t)start_status;
+MicDiagnostics_UpdateErrorCodes();
+
+if (start_status == HAL_OK)
+    {
+    mic_diag.dma_start_ok_count++;
+    mic_diag.dma_session_start_ok_count++;
+    audio_diag_mdf_start_count++;
+    microphone_active = 1U;
+    mic_active = 1U;
+    mic_window_count++;
+    }
+else
+    {
+    audio_accept_chunks = 0U;
+    mic_diag.dma_start_error_count++;
+    mic_diag.dma_session_start_error_count++;
+    audio_diag_start_failures++;
+    LED_On(LED_RED);
+    }
+}
+
+static void SensorPhase_StopMicWindow(void)
+{
+    HAL_StatusTypeDef stop_status;
+
+    audio_accept_chunks = 0U;
+
+    if (microphone_active == 0U)
+    {
+        MicrophoneClock_Disable();
+        return;
+    }
+
+    mic_diag.mdf_stop_attempt_count++;
+    stop_status = HAL_MDF_AcqStop_DMA(&MdfHandle0);
+    mic_diag.last_mdf_stop_status = (int32_t)stop_status;
+    MicDiagnostics_UpdateErrorCodes();
+
+    if (stop_status == HAL_OK)
+    {
+        mic_diag.mdf_stop_ok_count++;
+        mic_diag.dma_session_stop_ok_count++;
+        audio_diag_mdf_stop_count++;
+    }
+    else
+    {
+        mic_diag.mdf_stop_error_count++;
+        mic_diag.dma_session_stop_error_count++;
+        audio_diag_stop_failures++;
+    }
+
+    microphone_active = 0U;
+    mic_active = 0U;
+    MicrophoneClock_Disable();
+
+    mic_diag.audio_ring_count_at_stop = AudioRing_Count();
+    if (Audio_DrainQueuedChunks(HAL_GetTick()) != LOG_OK)
+    {
+        nand_write_error_count++;
+        LED_On(LED_RED);
+    }
+
+    mic_valid_samples = mic_diag.audio_window_samples_accepted;
+    mic_last_window_duration_ms = HAL_GetTick() - mic_diag.last_dma_start_tick_ms;
+    Audio_PublishBasicFeatures(0U, LOG_OK);
+}
+
+static void SensorPhase_RequestLightMeasurement(void)
+{
+    if ((light_measurement_pending == 0U) && (light_active == 0U))
+    {
+        light_measurement_pending = 1U;
+        light_measurements_requested++;
+    }
+}
+
+static uint8_t SensorPhase_IsEnvMetricsReady(void)
+{
+const uint8_t light_ready =
+    ((light_active == 0U) && (light_measurement_pending == 0U) &&
+    (light_measurement_count > 0U)) ? 1U : 0U;
+const uint8_t mic_ready =
+    ((microphone_active == 0U) &&
+    (audio_basic_features_computed > 0U)) ? 1U : 0U;
+
+return (uint8_t)((light_ready != 0U) && (mic_ready != 0U));
+}
+
+static void SensorPhase_TrySendStepBle(uint32_t now_ms)
+{
+    if ((now_ms - last_step_ble_tx_ms) < SENSOR_STEP_BLE_PERIOD_MS)
+    {
+        return;
+    }
+
+    last_step_ble_tx_ms = now_ms;
+    // TODO: replace with real BLE live step notification call.
+}
+
+static void SensorPhase_EnterEnvStart(uint32_t now_ms)
+{
+    sensor_phase = SENSOR_PHASE_ENV_START;
+    sensor_phase_start_ms = now_ms;
+    sensor_cycle_start_ms = now_ms;
+    env_start_done = 0U;
+    env_end_done = 0U;
+    combined_metrics_pending = 0U;
+    imu_window_active = 0U;
+    SensorPhase_StopImuRun();
+    SensorPhase_StartMicWindow();
+    SensorPhase_RequestLightMeasurement();
+}
+
+static void SensorPhase_EnterImuRun(uint32_t now_ms)
+{
+    sensor_phase = SENSOR_PHASE_IMU_RUN;
+    sensor_phase_start_ms = now_ms;
+    last_step_ble_tx_ms = now_ms;
+    env_start_done = 1U;
+    SensorPhase_StopMicWindow(); //    light_measurement_pending = 0U;
+    imu_window_active = 1U;
+    imu_next_sample_tick_ms = now_ms + IMU_SAMPLE_PERIOD_MS;
+}
+
+static void SensorPhase_StopImuRun(void)
+{
+    imu_window_active = 0U;
+    sensor_tick_pending = 0U;
+}
+
+static void SensorPhase_EnterEnvEnd(uint32_t now_ms)
+{
+    sensor_phase = SENSOR_PHASE_ENV_END;
+    sensor_phase_start_ms = now_ms;
+    env_end_done = 0U;
+    combined_metrics_pending = 1U;
+    SensorPhase_StopImuRun();
+    SensorPhase_StartMicWindow();
+    SensorPhase_RequestLightMeasurement();
+}
+
+static void SensorSuperframe_Init(uint32_t now_ms)
+{
+    acquisition_timebase_ms = now_ms; //SensorPhase_EnterEnvStart(now_ms);
+    imu_next_sample_tick_ms = now_ms + IMU_SAMPLE_PERIOD_MS;
+    sensor_tick_pending = 0U;
+    SensorPhase_EnterEnvStart(now_ms); 
+}
+
+static void SensorSuperframe_Process(uint32_t now_ms)
+{
+    uint32_t cycle_elapsed_ms = now_ms - sensor_cycle_start_ms;
+
+    switch (sensor_phase)
+    {
+    case SENSOR_PHASE_ENV_START:
+    if ((env_start_done == 0U) &&
+    ((now_ms - sensor_phase_start_ms) >= SENSOR_ENV_START_MS))
+    {
+        SensorPhase_EnterImuRun(now_ms);
+    }
+    break;
+
+    case SENSOR_PHASE_IMU_RUN:
+    if (imu_window_active != 0U)
+    {
+        SensorPhase_TrySendStepBle(now_ms);
+    }
+    if (cycle_elapsed_ms >= SENSOR_IMU_END_MS)
+    {
+        SensorPhase_EnterEnvEnd(now_ms);
+    }
+    break;
+
+    case SENSOR_PHASE_ENV_END:
+    if ((combined_metrics_pending != 0U) &&
+    (SensorPhase_IsEnvMetricsReady() != 0U))
+    {
+        combined_metrics_pending = 0U;
+        env_end_done = 1U;
+        /* TODO: replace with real BLE live combined notification call. */
+    }
+    if (cycle_elapsed_ms >= SENSOR_EPOCH_MS)
+    {
+        SensorPhase_EnterEnvStart(now_ms);
+    }
+    break;
+
+    default:
+    SensorPhase_EnterEnvStart(now_ms);
+    break;
+    }
+}
+
+static void LiveMode_Start(uint32_t now_ms)
+{
+    live_mode_requested = 0U;
+    live_mode_stop_requested = 0U;
+    live_mode_active = 1U;
+    SensorSuperframe_Init(now_ms);
+}
+
+static void LiveMode_Stop(void)
+{
+    live_mode_requested = 0U;
+    live_mode_stop_requested = 0U;
+    live_mode_active = 0U;
+    SensorPhase_StopImuRun();
+    SensorPhase_StopMicWindow();
+    light_measurement_pending = 0U;
+    combined_metrics_pending = 0U;
+    env_start_done = 0U;
+    env_end_done = 0U;
+}
+
+static uint8_t AudioScheduler_DeadlineWasBusy(uint32_t deadline_ms)
+{
+    uint32_t busy_duration_ms;
+    uint32_t deadline_offset_ms;
+
+    if (audio_scheduler_last_busy_interval_valid == 0U)
+    {
+        return 0U;
+    }
+
+    busy_duration_ms = audio_scheduler_last_busy_end_ms -
+                       audio_scheduler_last_busy_start_ms;
+    deadline_offset_ms = deadline_ms - audio_scheduler_last_busy_start_ms;
+
+    return (deadline_offset_ms <= busy_duration_ms) ? 1U : 0U;
+}
+
+static void AudioScheduler_Init(void)
+{
+    uint32_t now_ms = HAL_GetTick();
+
+    audio_windows_requested = 0U;
+    audio_windows_started = 0U;
+    audio_windows_completed = 0U;
+    audio_windows_incomplete = 0U;
+    audio_windows_missed = 0U;
+    audio_window_last_start_ms = 0U;
+    audio_window_previous_start_ms = 0U;
+    audio_window_start_interval_ms = 0U;
+
+    audio_scheduler_first_deadline_ms = now_ms;
+    audio_scheduler_next_deadline_ms = now_ms;
+    audio_scheduler_last_busy_start_ms = 0U;
+    audio_scheduler_last_busy_end_ms = 0U;
+    audio_scheduler_last_busy_interval_valid = 0U;
+    audio_scheduler_enabled = 1U;
+
+    acquisition_epoch_count = 0U;
+    acquisition_epoch_start_tick = now_ms;
+    acquisition_deadline_miss_count = 0U;
+    acquisition_timebase_ms = now_ms;
+    imu_next_sample_tick_ms = now_ms + IMU_SAMPLE_PERIOD_MS;
+    imu_samples_current_epoch = 0U;
+    imu_samples_total = 0U;
+    imu_missed_samples = 0U;
+    imu_buffer_overrun_count = 0U;
+
+    light_measurement_pending = 0U;
+    light_exposure_state_valid = 0U;
+    light_exposure_state = LIGHT_DARK;
+    light_measurements_requested = 0U;
+    light_measurements_started = 0U;
+    light_measurements_completed = 0U;
+    light_measurements_failed = 0U;
+    light_measurement_processing_last_ms = 0U;
+    light_measurement_processing_max_ms = 0U;
+    memset((void *)&light_feature_latest, 0, sizeof(light_feature_latest));
+    light_feature_latest.previous_exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
+    light_feature_latest.exposure_class = LIGHT_EXPOSURE_UNAVAILABLE;
+}
+
+static void AudioScheduler_Process(uint32_t now_ms)
+{
+    uint32_t due_deadlines;
+    uint32_t elapsed_ms;
+    uint8_t can_start;
+    uint8_t deadline_was_busy;
+
+    if (next_window_sequence == UINT32_MAX)
+    {
+        nand_storage_full = 1U;
+        storage_full_latched = 1U;
+    }
+
+    if ((audio_scheduler_enabled == 0U) ||
+        (acquisition_paused_for_ble_sync != 0U) ||
+        (user_button_pressed != 0U) ||
+        (factory_erase_requested != 0U) ||
+        (factory_erase_in_progress != 0U) ||
+        (ble_sync_requested != 0U) ||
+        ((int32_t)(now_ms - audio_scheduler_next_deadline_ms) < 0))
+    {
+        return;
+    }
+
+    elapsed_ms = now_ms - audio_scheduler_next_deadline_ms;
+    due_deadlines = (elapsed_ms / AUDIO_WINDOW_PERIOD_MS) + 1U;
+    audio_windows_requested += due_deadlines;
+
+    can_start = ((current_state == STATE_IDLE) &&
+                 (usb_flag == 0U) &&
+                 (start_acquisition_requested == 0U) &&
+                 (stop_acquisition_requested == 0U) &&
+                 (microphone_active == 0U) &&
+                 (storage_full_latched == 0U)) ? 1U : 0U;
+
+    deadline_was_busy = AudioScheduler_DeadlineWasBusy(
+            audio_scheduler_next_deadline_ms);
+
+    if ((due_deadlines == 1U) &&
+        (can_start != 0U) &&
+        (deadline_was_busy == 0U))
+    {
+        acquisition_epoch_start_tick = audio_scheduler_next_deadline_ms;
+        acquisition_epoch_count++;
+        imu_samples_current_epoch = 0U;
+        start_acquisition_requested = 1U;
+        start_request_count++;
+    }
+    else
+    {
+        audio_windows_missed += due_deadlines;
+        acquisition_deadline_miss_count += due_deadlines;
+    }
+
+    audio_scheduler_next_deadline_ms += due_deadlines * AUDIO_WINDOW_PERIOD_MS;
+}
+
+static void AudioScheduler_RecordWindowStart(uint32_t start_ms)
+{
+    if (audio_windows_started != 0U)
+    {
+        audio_window_previous_start_ms = audio_window_last_start_ms;
+        audio_window_start_interval_ms = start_ms - audio_window_last_start_ms;
+    }
+
+    audio_window_last_start_ms = start_ms;
+    audio_windows_started++;
+    audio_scheduler_last_busy_start_ms = start_ms;
+    audio_scheduler_last_busy_interval_valid = 0U;
+}
+
+static void AudioScheduler_RecordWindowEnd(uint32_t end_ms)
+{
+    audio_scheduler_last_busy_end_ms = end_ms;
+    audio_scheduler_last_busy_interval_valid = 1U;
+}
+
+static void AudioScheduler_PauseForBleSync(void)
+{
+    acquisition_paused_for_ble_sync = 1U;
+    start_acquisition_requested = 0U;
+    sensor_tick_pending = 0U;
+}
+
+static void AudioScheduler_ResumeAfterBleSync(uint32_t now_ms)
+{
+    if ((audio_scheduler_enabled != 0U) &&
+        ((int32_t)(now_ms - audio_scheduler_next_deadline_ms) >= 0))
+    {
+        uint32_t elapsed_ms = now_ms - audio_scheduler_next_deadline_ms;
+        acquisition_cycles_skipped_for_ble_sync +=
+                (elapsed_ms / AUDIO_WINDOW_PERIOD_MS) + 1U;
+    }
+
+    audio_scheduler_next_deadline_ms = now_ms + AUDIO_WINDOW_PERIOD_MS;
+    audio_scheduler_last_busy_interval_valid = 0U;
+    acquisition_paused_for_ble_sync = 0U;
+    start_acquisition_requested = 0U;
+    sensor_tick_pending = 0U;
+    imu_next_sample_tick_ms = now_ms + IMU_SAMPLE_PERIOD_MS;
+}
+
+static uint32_t AudioRing_CountFrom(uint32_t head, uint32_t tail)
+{
+    if (head >= tail)
+    {
+        return head - tail;
+    }
+
+    return (AUDIO_RING_SLOT_COUNT - tail) + head;
+}
+
+static uint32_t AudioRing_Count(void)
+{
+    uint32_t head = audio_ring_head;
+    uint32_t tail = audio_ring_tail;
+
+    return AudioRing_CountFrom(head, tail);
+}
+
+static void AudioRing_Reset(void)
+{
+    audio_accept_chunks = 0U;
+    audio_ring_head = 0U;
+    audio_ring_tail = 0U;
+    __DMB();
+}
+
+static void AudioRing_UpdateHighWatermark(uint32_t count)
+{
+    if (count > mic_diag.audio_ring_high_watermark)
+    {
+        mic_diag.audio_ring_high_watermark = count;
+    }
+    if (count > audio_diag_ring_max_occupancy)
+    {
+        audio_diag_ring_max_occupancy = count;
+    }
+}
+
+static void AudioRing_EnqueueFromIsr(const int16_t *samples)
+{
+    uint32_t head;
+    uint32_t tail;
+    uint32_t next_head;
+
+    if (current_state != STATE_ACQUISITION)
+    {
+        audio_diag_stale_callbacks++;
+        return;
+    }
+
+    if (audio_accept_chunks == 0U)
+    {
+        audio_diag_stale_callbacks++;
+        if (mic_diag.audio_window_target_reached != 0U)
+        {
+            mic_diag.audio_samples_discarded_beyond_window += AUDIO_CHUNK_SAMPLES;
+        }
+        else
+        {
+            mic_diag.audio_samples_discarded_during_stop += AUDIO_CHUNK_SAMPLES;
+        }
+        return;
+    }
+
+    head = audio_ring_head;
+    tail = audio_ring_tail;
+    next_head = head + 1U;
+    if (next_head >= AUDIO_RING_SLOT_COUNT)
+    {
+        next_head = 0U;
+    }
+
+    if (next_head == tail)
+    {
+        mic_diag.audio_ring_overflow_count++;
+        mic_diag.audio_ring_overflow_samples += AUDIO_CHUNK_SAMPLES;
+        mic_diag.buffer_drop_or_overwrite_count++;
+        mic_overrun_count++;
+        audio_diag_ring_overflows++;
+        return;
+    }
+
+    memcpy(audio_ring[head].samples, samples, AUDIO_CHUNK_SAMPLES * sizeof(int16_t));
+    __DMB();
+
+    audio_ring_head = next_head;
+    mic_diag.audio_chunks_enqueued++;
+    mic_diag.audio_window_chunks_published++;
+    mic_diag.audio_window_samples_published += AUDIO_CHUNK_SAMPLES;
+    mic_diag.buffer_ready_count++;
+    AudioRing_UpdateHighWatermark(AudioRing_CountFrom(next_head, tail));
+
+    if ((mic_diag.audio_window_chunks_published >= AUDIO_WINDOW_REQUIRED_CHUNKS) &&
+        (mic_diag.audio_window_target_reached == 0U))
+    {
+        mic_diag.audio_window_target_reached = 1U;
+        audio_accept_chunks = 0U;
+        __DMB();
+
+        if (stop_acquisition_requested == 0U)
+        {
+            stop_acquisition_requested = 1U;
+            mic_diag.audio_window_stop_request_count++;
+            mic_diag.audio_window_target_stop_request_count++;
+        }
+    }
+}
+
+static uint32_t Audio_Crc32(const int16_t *samples, uint32_t sample_count)
+{
+#if (AUDIO_ENABLE_WINDOW_DIAGNOSTICS != 0U)
+    const uint8_t *bytes = (const uint8_t *)samples;
+    uint32_t crc = 0xFFFFFFFFU;
+    uint32_t byte_count = sample_count * sizeof(int16_t);
+
+    for (uint32_t i = 0U; i < byte_count; i++)
+    {
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
+        crc ^= bytes[i];
+        for (uint32_t bit = 0U; bit < 8U; bit++)
+        {
+            uint32_t mask = 0U - (crc & 1U);
+            crc = (crc >> 1U) ^ (0xEDB88320U & mask);
+        }
+    }
+    return ~crc;
+#else
+    (void)samples;
+    (void)sample_count;
+    return 0U;
+#endif
+}
+
+static AudioBasicFeatureDebug Audio_ComputeBasicFeatures(
+        const int16_t *samples,
+        uint32_t sample_count)
+{
+    AudioBasicFeatureDebug features = {0};
+    int64_t sample_sum = 0;
+    double centered_energy = 0.0;
+    uint32_t absolute_peak = 0U;
+    uint32_t clipped_count = 0U;
+
+    features.sample_count = sample_count;
+    features.rms_zero_mean_dbfs = -INFINITY;
+    features.peak_dbfs = -INFINITY;
+    features.a_weighted_rms_dbfs = -INFINITY;
+    features.estimated_laeq_dba = -INFINITY;
+    features.environment_class = (uint8_t)AUDIO_ENV_UNAVAILABLE;
+
+    if ((samples == NULL) || (sample_count == 0U))
+    {
+        return features;
+    }
+
+    for (uint32_t i = 0U; i < sample_count; i++)
+    {
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
+        sample_sum += samples[i];
+    }
+
+    features.mean_counts = (double)sample_sum / (double)sample_count;
+
+    for (uint32_t i = 0U; i < sample_count; i++)
+    {
+        int32_t sample = samples[i];
+        uint32_t magnitude = (sample < 0) ? (uint32_t)(-sample) : (uint32_t)sample;
+        double centered = (double)sample - features.mean_counts;
+
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
+
+        centered_energy += centered * centered;
+
+        if (magnitude > absolute_peak)
+        {
+            absolute_peak = magnitude;
+        }
+
+        if ((sample == INT16_MIN) || (sample == INT16_MAX))
+        {
+            clipped_count++;
+        }
+    }
+
+    features.rms_zero_mean_counts = sqrt(centered_energy / (double)sample_count);
+    features.absolute_peak_counts = absolute_peak;
+    features.clipped_sample_count = clipped_count;
+    features.clipped_sample_percentage =
+            (100.0 * (double)clipped_count) / (double)sample_count;
+
+    if (features.rms_zero_mean_counts > 0.0)
+    {
+        features.rms_zero_mean_dbfs =
+                20.0 * log10(features.rms_zero_mean_counts / 32768.0);
+    }
+
+    if (absolute_peak > 0U)
+    {
+        features.peak_dbfs = 20.0 * log10((double)absolute_peak / 32768.0);
+    }
+
+    return features;
+}
+
+static uint8_t Audio_ComputeAWeightedFeatures(
+        const int16_t *samples,
+        uint32_t sample_count,
+        uint32_t sample_rate_hz,
+        double mean_counts,
+        double *rms_counts,
+        double *rms_dbfs)
+{
+    AudioBiquadState states[3] = {{0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}};
+    double weighted_energy = 0.0;
+    double mean_square;
+
+    if ((rms_counts == NULL) || (rms_dbfs == NULL))
+    {
+        return 0U;
+    }
+
+    *rms_counts = 0.0;
+    *rms_dbfs = -INFINITY;
+
+    if ((samples == NULL) || (sample_count == 0U) ||
+        (sample_rate_hz != AUDIO_SAMPLE_RATE_HZ) ||
+        !isfinite(mean_counts))
+    {
+        return 0U;
+    }
+
+    /* Each one-second window is independent, so all biquad states start at zero. */
+    for (uint32_t i = 0U; i < sample_count; i++)
+    {
+        double section_input = (double)samples[i] - mean_counts;
+
+        if ((i & 0x7FU) == 0U)
+        {
+            App_ServiceTimeCriticalTasks();
+        }
+
+        for (uint32_t section = 0U; section < 3U; section++)
+        {
+            const AudioBiquadCoefficients *coefficients =
+                    &audio_a_weighting_biquads[section];
+            double output = coefficients->b0 * section_input + states[section].s1;
+            double next_s1 = coefficients->b1 * section_input -
+                             coefficients->a1 * output + states[section].s2;
+            double next_s2 = coefficients->b2 * section_input -
+                             coefficients->a2 * output;
+
+            if (!isfinite(output) || !isfinite(next_s1) || !isfinite(next_s2))
+            {
+                return 0U;
+            }
+
+            states[section].s1 = next_s1;
+            states[section].s2 = next_s2;
+            section_input = output;
+        }
+
+        weighted_energy += section_input * section_input;
+        if (!isfinite(weighted_energy) || (weighted_energy < 0.0))
+        {
+            return 0U;
+        }
+    }
+
+    mean_square = weighted_energy / (double)sample_count;
+    if (!isfinite(mean_square) || (mean_square < 0.0))
+    {
+        return 0U;
+    }
+
+    *rms_counts = sqrt(mean_square);
+    if (!isfinite(*rms_counts) || (*rms_counts <= 0.0))
+    {
+        *rms_counts = 0.0;
+        return 0U;
+    }
+
+    *rms_dbfs = 20.0 * log10(*rms_counts / 32768.0);
+    if (!isfinite(*rms_dbfs))
+    {
+        *rms_dbfs = -INFINITY;
+        return 0U;
+    }
+
+    return 1U;
+}
+
+static AudioEnvironmentClass Audio_ClassifyEnvironment(double estimated_laeq_dba)
+{
+    if (!isfinite(estimated_laeq_dba))
+    {
+        return AUDIO_ENV_UNAVAILABLE;
+    }
+
+    if (estimated_laeq_dba < 40.0) return AUDIO_ENV_VERY_QUIET;
+    if (estimated_laeq_dba < 45.0) return AUDIO_ENV_QUIET;
+    if (estimated_laeq_dba < 55.0) return AUDIO_ENV_MODERATE;
+    if (estimated_laeq_dba < 65.0) return AUDIO_ENV_LIVELY;
+    if (estimated_laeq_dba < 70.0) return AUDIO_ENV_NOISY;
+    if (estimated_laeq_dba < 85.0) return AUDIO_ENV_VERY_NOISY;
+
+    return AUDIO_ENV_HIGH_EXPOSURE;
+}
 
 #if (AUDIO_STORE_FEATURE_RECORD != 0U)
 static int16_t Audio_RoundSaturateInt16(double value)
@@ -842,13 +1730,423 @@ static AudioFeatureRecordV1 Audio_BuildFeatureRecord(
 }
 #endif
 
+static void Audio_PublishBasicFeatures(uint8_t window_complete,
+                                       LogStatus drain_status)
+{
+    AudioBasicFeatureDebug features;
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+    AudioFeatureRecordV1 feature_record;
+#endif
+    uint32_t total_processing_start_ms;
+    uint32_t basic_processing_start_ms;
+    uint32_t a_weighting_start_ms;
+    uint32_t processing_elapsed_ms;
+    uint32_t history_index;
+    uint8_t z_values_are_finite;
 
+    total_processing_start_ms = HAL_GetTick();
+    basic_processing_start_ms = HAL_GetTick();
+    features = Audio_ComputeBasicFeatures(
+            audio_window_pcm,
+            audio_window_pcm_samples);
+    processing_elapsed_ms = HAL_GetTick() - basic_processing_start_ms;
 
+    audio_basic_feature_processing_last_ms = processing_elapsed_ms;
+    if (processing_elapsed_ms > audio_basic_feature_processing_max_ms)
+    {
+        audio_basic_feature_processing_max_ms = processing_elapsed_ms;
+    }
 
+    features.window_index = current_window_sequence;
+    features.window_start_ms = audio_window_last_start_ms;
+    features.complete =
+            ((window_complete != 0U) &&
+             (features.sample_count == AUDIO_WINDOW_TARGET_SAMPLES)) ? 1U : 0U;
 
+    features.acquisition_valid =
+            ((features.sample_count == mic_diag.audio_window_samples_accepted) &&
+             (drain_status == LOG_OK) &&
+             (mic_diag.audio_ring_overflow_count == 0U) &&
+             (mic_diag.last_dma_start_status == (int32_t)HAL_OK) &&
+             (mic_diag.last_mdf_stop_status == (int32_t)HAL_OK) &&
+             (mic_diag.last_mdf_error_code == 0U) &&
+             (mic_diag.last_dma_error_code == 0U)) ? 1U : 0U;
 
+    z_values_are_finite =
+            (isfinite(features.mean_counts) &&
+             isfinite(features.rms_zero_mean_counts) &&
+             isfinite(features.rms_zero_mean_dbfs) &&
+             isfinite(features.peak_dbfs) &&
+             isfinite(features.clipped_sample_percentage)) ? 1U : 0U;
 
+    features.valid =
+            ((features.sample_count == AUDIO_WINDOW_TARGET_SAMPLES) &&
+             (features.complete != 0U) &&
+             (features.acquisition_valid != 0U) &&
+             (z_values_are_finite != 0U)) ? 1U : 0U;
 
+    a_weighting_start_ms = HAL_GetTick();
+    features.a_weighting_valid = Audio_ComputeAWeightedFeatures(
+            audio_window_pcm,
+            audio_window_pcm_samples,
+            AUDIO_SAMPLE_RATE_HZ,
+            features.mean_counts,
+            &features.a_weighted_rms_counts,
+            &features.a_weighted_rms_dbfs);
+    processing_elapsed_ms = HAL_GetTick() - a_weighting_start_ms;
+
+    audio_a_weighting_processing_last_ms = processing_elapsed_ms;
+    if (processing_elapsed_ms > audio_a_weighting_processing_max_ms)
+    {
+        audio_a_weighting_processing_max_ms = processing_elapsed_ms;
+    }
+
+    audio_a_weighting_computed++;
+    if (features.a_weighting_valid != 0U)
+    {
+        features.estimated_laeq_dba =
+                features.a_weighted_rms_dbfs +
+                AUDIO_SPL_CALIBRATION_OFFSET_DB;
+        if (!isfinite(features.estimated_laeq_dba))
+        {
+            features.estimated_laeq_dba = -INFINITY;
+            features.a_weighting_valid = 0U;
+        }
+    }
+
+    if (features.a_weighting_valid == 0U)
+    {
+        audio_a_weighting_invalid++;
+    }
+
+    features.environment_class = (uint8_t)Audio_ClassifyEnvironment(
+            features.estimated_laeq_dba);
+    features.audio_flags = 0U;
+
+    if (features.complete != 0U)
+        features.audio_flags |= AUDIO_FLAG_COMPLETE;
+    if (features.acquisition_valid != 0U)
+        features.audio_flags |= AUDIO_FLAG_ACQUISITION_VALID;
+    if (features.a_weighting_valid != 0U)
+        features.audio_flags |= AUDIO_FLAG_A_WEIGHTED_FEATURE_VALID;
+    if (features.clipped_sample_count > 0U)
+        features.audio_flags |= AUDIO_FLAG_CLIPPED;
+    if (isfinite(features.estimated_laeq_dba) &&
+        (features.estimated_laeq_dba >= 85.0))
+        features.audio_flags |= AUDIO_FLAG_HIGH_LEVEL;
+    if (features.a_weighting_valid == 0U)
+        features.audio_flags |= AUDIO_FLAG_SILENT_OR_UNAVAILABLE;
+
+    features.record_valid =
+            ((features.complete != 0U) &&
+             (features.acquisition_valid != 0U) &&
+             (features.valid != 0U) &&
+             (features.a_weighting_valid != 0U)) ? 1U : 0U;
+
+    audio_diag_pcm_crc32 =
+            (features.sample_count == AUDIO_WINDOW_TARGET_SAMPLES) ?
+            Audio_Crc32(audio_window_pcm, features.sample_count) : 0U;
+    audio_diag_rms_z_dbfs = features.rms_zero_mean_dbfs;
+    audio_diag_rms_a_dbfs = features.a_weighted_rms_dbfs;
+    audio_diag_peak_dbfs = features.peak_dbfs;
+    audio_diag_laeq_dba = features.estimated_laeq_dba;
+    audio_diag_environment_class = features.environment_class;
+
+    history_index = audio_basic_feature_history_write_index;
+    audio_basic_feature_history[history_index] = features;
+    audio_basic_feature_latest = features;
+
+    history_index++;
+    if (history_index >= AUDIO_BASIC_FEATURE_HISTORY_CAPACITY)
+    {
+        history_index = 0U;
+    }
+    audio_basic_feature_history_write_index = history_index;
+
+    if (audio_basic_feature_history_count < AUDIO_BASIC_FEATURE_HISTORY_CAPACITY)
+    {
+        audio_basic_feature_history_count++;
+    }
+
+    audio_basic_features_computed++;
+    if (features.valid == 0U)
+    {
+        audio_basic_features_invalid++;
+    }
+
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+    feature_record = Audio_BuildFeatureRecord(&features);
+    audio_feature_records_generated++;
+#endif
+
+    processing_elapsed_ms = HAL_GetTick() - total_processing_start_ms;
+    audio_total_feature_processing_last_ms = processing_elapsed_ms;
+    if (processing_elapsed_ms > audio_total_feature_processing_max_ms)
+    {
+        audio_total_feature_processing_max_ms = processing_elapsed_ms;
+    }
+
+#if (AUDIO_STORE_FEATURE_RECORD != 0U)
+    if (NANDLogger_AppendAudioFeatureRecord(&nand_logger,
+                                            &feature_record) != LOG_OK)
+    {
+        nand_write_error_count++;
+        LED_On(LED_RED);
+    }
+    else
+    {
+        afea_records_written++;
+    }
+#endif
+}
+
+static LogStatus Audio_AppendNextQueuedChunk(uint32_t timestamp_ms)
+{
+    LogStatus append_status = LOG_OK;
+    uint32_t tail;
+    uint32_t next_tail;
+#if (AUDIO_STORE_RAW_PCM != 0U)
+    uint32_t page_delta = 0U;
+#endif
+    uint32_t remaining_samples;
+    uint32_t accepted_samples;
+    uint32_t discarded_samples;
+    uint32_t skipped_samples;
+    uint32_t available_samples;
+    uint32_t window_offset;
+    const int16_t *valid_samples;
+
+#if (AUDIO_STORE_RAW_PCM == 0U)
+    (void)timestamp_ms;
+#endif
+
+    if (audio_ring_tail == audio_ring_head)
+    {
+        return LOG_OK;
+    }
+
+    __DMB();
+    tail = audio_ring_tail;
+    next_tail = tail + 1U;
+    if (next_tail >= AUDIO_RING_SLOT_COUNT)
+    {
+        next_tail = 0U;
+    }
+
+    skipped_samples = (audio_software_warmup_remaining < AUDIO_CHUNK_SAMPLES) ?
+                      audio_software_warmup_remaining : AUDIO_CHUNK_SAMPLES;
+    audio_software_warmup_remaining -= skipped_samples;
+    mic_warmup_samples_discarded += skipped_samples;
+    audio_diag_warmup_discarded_samples += skipped_samples;
+
+    available_samples = AUDIO_CHUNK_SAMPLES - skipped_samples;
+    valid_samples = &audio_ring[tail].samples[skipped_samples];
+
+    if (mic_diag.audio_window_samples_accepted < mic_diag.audio_window_target_samples)
+    {
+        remaining_samples = mic_diag.audio_window_target_samples -
+                            mic_diag.audio_window_samples_accepted;
+        accepted_samples = (remaining_samples < available_samples) ?
+                           remaining_samples : available_samples;
+    }
+    else
+    {
+        accepted_samples = 0U;
+    }
+
+    discarded_samples = available_samples - accepted_samples;
+
+    if (accepted_samples > 0U)
+    {
+        window_offset = audio_window_pcm_samples;
+        if ((window_offset > AUDIO_WINDOW_TARGET_SAMPLES) ||
+            (accepted_samples > (AUDIO_WINDOW_TARGET_SAMPLES - window_offset)))
+        {
+            return LOG_ERR_BAD_ARGUMENT;
+        }
+
+        memcpy(&audio_window_pcm[window_offset],
+               valid_samples,
+               accepted_samples * sizeof(int16_t));
+
+        if (window_offset == 0U)
+        {
+            audio_diag_first_valid_sample = valid_samples[0];
+        }
+        audio_diag_last_valid_sample = valid_samples[accepted_samples - 1U];
+
+        mic_diag.audio_window_samples_accepted += accepted_samples;
+        audio_window_pcm_samples = window_offset + accepted_samples;
+        mic_valid_samples = audio_window_pcm_samples;
+        audio_diag_valid_samples = audio_window_pcm_samples;
+
+#if (AUDIO_STORE_RAW_PCM != 0U)
+        mic_diag.nand_append_attempt_count++;
+        mic_diag.page_sequence_before_last_append = nand_logger.page_sequence;
+
+        append_status = NANDLogger_AppendAudioBuffer(
+                &nand_logger,
+                valid_samples,
+                accepted_samples,
+                timestamp_ms);
+
+        mic_diag.last_nand_append_status = (int32_t)append_status;
+        mic_diag.page_sequence_after_last_append = nand_logger.page_sequence;
+
+        if (mic_diag.page_sequence_after_last_append >= mic_diag.page_sequence_before_last_append)
+        {
+            page_delta = mic_diag.page_sequence_after_last_append -
+                         mic_diag.page_sequence_before_last_append;
+        }
+
+        mic_diag.last_page_sequence_delta = page_delta;
+        mic_diag.last_nand_append_tick_ms = HAL_GetTick();
+
+        if (append_status != LOG_OK)
+        {
+            mic_diag.nand_append_error_count++;
+        }
+        else
+        {
+            mic_diag.nand_append_ok_count++;
+
+            if (page_delta == 1U)
+            {
+                mic_diag.audio_pages_confirmed_written++;
+            }
+        }
+#endif
+    }
+
+    mic_diag.audio_samples_discarded_beyond_window += discarded_samples;
+    audio_ring_tail = next_tail;
+    mic_diag.audio_chunks_dequeued++;
+
+    return append_status;
+}
+
+static LogStatus Audio_DrainQueuedChunks(uint32_t timestamp_ms)
+{
+    LogStatus status = LOG_OK;
+    LogStatus first_error = LOG_OK;
+
+    while (audio_ring_tail != audio_ring_head)
+    {
+        status = Audio_AppendNextQueuedChunk(timestamp_ms);
+        if ((status != LOG_OK) && (first_error == LOG_OK))
+        {
+            first_error = status;
+        }
+    }
+
+    return first_error;
+}
+
+static void UpdateStateLed(AppState state)
+{
+    uint32_t now = HAL_GetTick();
+    uint32_t blink_interval_ms = 0U;
+
+    if ((storage_full_latched != 0U) && (state != STATE_FACTORY_ERASE))
+    {
+        LED_On(LED_GREEN);
+        LED_On(LED_RED);
+        return;
+    }
+
+    if ((ble_sync_abort_led_until_ms != 0U) &&
+        ((int32_t)(now - ble_sync_abort_led_until_ms) < 0))
+    {
+        LED_Off(LED_GREEN);
+        if ((now - ble_sync_abort_led_last_toggle_ms) >= 150U)
+        {
+            ble_sync_abort_led_last_toggle_ms = now;
+            LED_Toggle(LED_RED);
+        }
+        return;
+    }
+    else if (ble_sync_abort_led_until_ms != 0U)
+    {
+        ble_sync_abort_led_until_ms = 0U;
+        LED_Off(LED_RED);
+        state_led_initialized = 0U;
+    }
+
+    if ((state_led_initialized == 0U) || (state != previous_state_led))
+    {
+        state_led_initialized = 1U;
+        previous_state_led = state;
+        state_led_last_toggle_ms = now;
+
+        switch (state)
+        {
+            case STATE_IDLE:
+                LED_Off(LED_GREEN);
+                return;
+
+            case STATE_ACQUISITION:
+                LED_On(LED_GREEN);
+                return;
+
+            case STATE_USB_CONNECTED:
+            case STATE_DOWNLOAD:
+                LED_On(LED_GREEN);
+                return;
+
+            case STATE_BLE_SYNC:
+                LED_Off(LED_RED);
+                LED_On(LED_GREEN);
+                return;
+
+            case STATE_FACTORY_ERASE:
+                LED_Off(LED_RED);
+                LED_On(LED_GREEN);
+                return;
+
+            default:
+                LED_Off(LED_GREEN);
+                return;
+        }
+    }
+
+    switch (state)
+    {
+        case STATE_IDLE:
+            LED_Off(LED_GREEN);
+            break;
+
+        case STATE_ACQUISITION:
+            LED_On(LED_GREEN);
+            break;
+
+        case STATE_USB_CONNECTED:
+            blink_interval_ms = 500U;
+            break;
+
+        case STATE_DOWNLOAD:
+            blink_interval_ms = 125U;
+            break;
+
+        case STATE_BLE_SYNC:
+            blink_interval_ms = 250U;
+            break;
+
+        case STATE_FACTORY_ERASE:
+            blink_interval_ms = 250U;
+            break;
+
+        default:
+            LED_Off(LED_GREEN);
+            break;
+    }
+
+    if ((blink_interval_ms != 0U) &&
+        ((now - state_led_last_toggle_ms) >= blink_interval_ms))
+    {
+        state_led_last_toggle_ms = now;
+        LED_Toggle(LED_GREEN);
+    }
+}
 
 void App_UpdateDownloadLed(void)
 {
@@ -863,7 +2161,19 @@ void App_UpdateFactoryEraseLed(void)
     }
 }
 
+static void MicDiagnostics_UpdateErrorCodes(void)
+{
+    mic_diag.last_mdf_error_code = MdfHandle0.ErrorCode;
 
+    if (MdfHandle0.hdma != NULL)
+    {
+        mic_diag.last_dma_error_code = MdfHandle0.hdma->ErrorCode;
+    }
+    else
+    {
+        mic_diag.last_dma_error_code = 0U;
+    }
+}
 
 void HAL_MDF_AcqHalfCpltCallback(MDF_HandleTypeDef *hmdf)
 {
@@ -1199,9 +2509,17 @@ static void LightMeasurement_Finalize(uint8_t measurement_valid)
     light_active = 0U;
 }
 
+static void MicrophoneClock_Enable(void)
+{
+    MDF1->CKGCR |= MDF_CKGCR_CKDEN;
+    MdfHandle0.Instance->SITFCR |= MDF_SITFCR_SITFEN;
+}
 
-
-
+static void MicrophoneClock_Disable(void)
+{
+    MdfHandle0.Instance->SITFCR &= ~MDF_SITFCR_SITFEN;
+    MDF1->CKGCR &= ~MDF_CKGCR_CKDEN;
+}
 
 static void LightMeasurement_Process(uint32_t now_ms)
 {

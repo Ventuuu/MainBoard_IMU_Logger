@@ -64,10 +64,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/USB_Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
     ${CMAKE_CURRENT_SOURCE_DIR}/USB_Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
     ${CMAKE_CURRENT_SOURCE_DIR}/USB_Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_audio.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_sensor_workflow.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_state_ui.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_system_ops.c
     # Add user defined sources
 )
 
