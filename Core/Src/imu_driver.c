@@ -122,7 +122,7 @@ uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
                              IMU_Data *gyro_data,
                              uint8_t *raw_accelerometer,
                              uint8_t *raw_gyroscope,
-                             uint8_t *step_count) {
+                             uint16_t *step_count) {
     uint8_t raw[12];
     int16_t acc_x;
     int16_t acc_y;
@@ -172,7 +172,7 @@ uint8_t IMU_ReadCombinedData(IMU_Data *acc_data,
 
     /* --- Read steps   ---*/
     StepCounter_step();
-    *step_count = (uint8_t)((StepCounter_Y.stepnumber > 0U) ? (StepCounter_Y.stepnumber - 1U) : 0U);
+    *step_count = (uint16_t)((StepCounter_Y.stepnumber > 0U) ? (StepCounter_Y.stepnumber - 1U) : 0U);
 
     return 1U;
 }

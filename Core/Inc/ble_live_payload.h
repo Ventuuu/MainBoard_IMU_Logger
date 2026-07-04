@@ -97,7 +97,7 @@
  * ----------------------------------------------------------------------- */
 
 /**
- * @brief IMU metrics packet — 7 bytes.
+ * @brief IMU metrics packet — 4 bytes.
  *
  * Sent every BLE_LIVE_IMU_INTERVAL_MS regardless of value change.
  *
@@ -110,7 +110,7 @@
 typedef struct __attribute__((packed))
 {
     uint8_t  msg_type;        /**< BLE_MSG_IMU_METRICS                  */
-    uint8_t  step_count;      /**< Cumulative step count                */
+    uint16_t step_count;      /**< Cumulative step count                */
     uint8_t  reserved;        /**< Must be 0x00                         */
 } BleLiveImuPayload;
 
@@ -293,7 +293,7 @@ void BLE_Live_OnDisconnected(uint32_t now_ms);
  * @param  activity      Latest activity classification.
  */
 void BLE_Live_TryNotifyImu(uint32_t now_ms,
-                           uint8_t step_count);
+                           uint16_t step_count);
 
 /**
  * @brief  Attempt to transmit light and mic packets if the epoch has elapsed

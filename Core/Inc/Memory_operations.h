@@ -57,7 +57,7 @@ NAND_info read_info(uint16_t bad_blocks[2048]);
 void write_packet(uint16_t sample, Time_Struct timestamp,
                   uint8_t *accelerometer, uint8_t *gyroscope,
                   uint8_t *light_raw,
-                  uint8_t *step_count,
+                  uint16_t *step_count,
                   uint8_t *packet_buffer);
 
 void erase_memory(void);
@@ -363,7 +363,7 @@ LogStatus NANDLogger_AppendSensorRecord(NandLogger *logger,
                                         Time_Struct timestamp,
                                         const uint8_t *accelerometer,
                                         const uint8_t *gyroscope,
-                                        const uint8_t *step_count,
+                                        const uint16_t *step_count,
                                         const uint8_t *light_raw);
 
 LogStatus NANDLogger_AppendAudioBuffer(NandLogger *logger,
