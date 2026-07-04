@@ -233,24 +233,28 @@ int * remove_outsiders(int * temps)
     return cleaned_temps;
 }
 
-int get_light_temperature(uint16_t * samples, uint16_t sample_number)
+int get_light_temperature(uint16_t * samples)
 {
     float * rel_samples;
     int * RGB;
     static uint16_t temps[SAMPLE_SIZE];
+    
+    rel_samples = get_relative_light_colors(samples);    
+    RGB = get_RGB(rel_samples);
+    temps = RGB_to_temperature(RGB);
+
+    return temp;
+}
+
+int get_avg_light_temperature(uint16_t * temps, uint16_t sample_number)
+{
     static uint16_t cleaned_temps[SAMPLE_SIZE];
     int average_temp=0;
 
-    rel_samples = get_relative_light_colors(samples);    
-    RGB = get_RGB(rel_samples);
-    temps[sample_number] = RGB_to_temperature(RGB);
-
-    if (sample_number == SAMPLE_SIZE) {
-        cleaned_temps = remove_outsiders(int *temps);
-        for (i=0; i<SAMPLE_SIZE; i++) {
-            average_temp += cleaned_temps[i];
-            average_temp = average_temp/SAMPLE_SIZE;
-        }
+    cleaned_temps = remove_outsiders(int *temps);
+    for (i=0; i<SAMPLE_SIZE; i++) {
+        average_temp += cleaned_temps[i];
+        average_temp = average_temp/SAMPLE_SIZE;
     }
     return average_temp;
 }
