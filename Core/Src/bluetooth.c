@@ -30,7 +30,7 @@ void BLE_Initialize(void) {
 
     enter_command_mode();
 
-    uint8_t device_name[] = "SN,A9 - Big Bad Board\r";
+    uint8_t device_name[] = "SN,BLE_SW_A9\r";
     BLE_SendData(device_name, sizeof(device_name) - 1);
     HAL_UART_Receive(&huart3, command_ok_response, sizeof(command_ok_response), UART_TIMEOUT);
 
