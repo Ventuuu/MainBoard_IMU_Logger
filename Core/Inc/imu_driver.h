@@ -23,6 +23,9 @@
 #define IMU_WHO_AM_I_REG        0x0F
 #define IMU_WHO_AM_I_VALUE      0x22
 
+// Interrupt REGISTER:
+#define IMU_INT1_CTRL_REG       0x0D // INT1 pin control register
+
 // Accelerometer and Gyroscope Control Registers
 #define IMU_ACC_CTRL1_REG       0x10 // ODR and FS selection for accelerometer
 #define IMU_GYR_CTRL2_REG       0x11 // ODR and FS selection for gyroscope
@@ -64,6 +67,8 @@
 #define GYR_FS_500DPS           (1 << 2)
 #define GYR_FS_1000DPS          (2 << 2)
 #define GYR_FS_2000DPS          (3 << 2)
+
+#define DEG2RAD 0.01745329252f
 
 // Performance Modes (High Performance mode disable bits)
 #define ACC_HIGH_PERF_DISABLE_BIT   (1 << 4) // CTRL6_C[4]
@@ -113,5 +118,13 @@ void IMU_ReadAccelerometerData(IMU_Data *acc_data, uint8_t *raw_data);
  * @param gyro_data Pointer to an IMU_Data struct where the results will be stored.
  */
 void IMU_ReadGyroscopeData(IMU_Data *gyro_data, uint8_t *raw_data);
+
+// --- Fetch Path (I2C Reads) ---
+void IMU_ReadAccelerometerRaw(uint8_t *raw_data);
+void IMU_ReadGyroscopeRaw(uint8_t *raw_data);
+
+// --- Drain Path (DSP Math) ---
+void IMU_ConvertAccelRawToFloat(IMU_Data *acc_data, const uint8_t *raw_data);
+void IMU_ConvertGyroRawToFloat(IMU_Data *gyro_data, const uint8_t *raw_data);
 
 #endif /* __IMU_DRIVER_H__ */

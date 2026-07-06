@@ -23,8 +23,8 @@ static uint8_t gyroscope_full_scale;
 // These functions are only used internally by the driver
 static uint8_t imu_read_register(uint8_t reg_addr, uint8_t* data, uint16_t data_len);
 static uint8_t imu_write_register(uint8_t reg_addr, uint8_t reg_data);
-static float get_accel_sensitivity(uint8_t accel_fs);
-static float get_gyro_sensitivity(uint8_t gyro_fs);
+//static float get_accel_sensitivity(uint8_t accel_fs);
+//static float get_gyro_sensitivity(uint8_t gyro_fs);
 
 // --- Public Function Implementations ---
 
@@ -72,6 +72,8 @@ void IMU_ConfigAccelerometer(uint8_t odr, uint8_t scale, uint8_t high_performanc
 
     // Write the new value back to the register
     imu_write_register(IMU_ACC_CTRL6_REG, ctrl6_value);
+
+    imu_write_register(IMU_INT1_CTRL_REG, 0x01);
 }
 
 /**
@@ -106,58 +108,44 @@ void IMU_ConfigGyroscope(uint8_t odr, uint8_t scale, uint8_t high_performance_mo
     imu_write_register(IMU_GYR_CTRL7_REG, ctrl7_value);
 }
 
-/**
- * @brief Reads the accelerometer data from the sensor and converts it to 'g'.
- * @param acc_data Pointer to an IMU_Data struct to store the converted data.
- */
-void IMU_ReadAccelerometerData(IMU_Data *acc_data, uint8_t *raw_data) {
-    //uint8_t raw_data[6]; // Buffer to hold 6 bytes for X, Y, Z axes
-    int16_t x_raw, y_raw, z_raw;
-    float sensitivity;
-
-    // Read 6 bytes of data starting from the first accelerometer register.
-    // The sensor auto-increments the register address, so a single read operation
-    // fetches all 3 axes (X, Y, Z).
+/* ====================================================================
+ * FETCH PATH: I2C Reads Only (Called immediately after interrupt)
+ * ==================================================================== */
+void IMU_ReadAccelerometerRaw(uint8_t *raw_data) {
     imu_read_register(IMU_ACC_OUT_X_L_REG, raw_data, 6);
-
-    // Combine LSB and MSB to form a signed 16-bit integer for each axis
-    x_raw = (int16_t)((raw_data[1] << 8) | raw_data[0]);
-    y_raw = (int16_t)((raw_data[3] << 8) | raw_data[2]);
-    z_raw = (int16_t)((raw_data[5] << 8) | raw_data[4]);
-
-    // Get the correct sensitivity factor based on the configured full scale
-    sensitivity = get_accel_sensitivity(accelerometer_full_scale);
-
-    // Convert raw data to 'g' (gravitational force) and store it in the struct
-    acc_data->x = (float)x_raw * sensitivity;
-    acc_data->y = (float)y_raw * sensitivity;
-    acc_data->z = (float)z_raw * sensitivity;
 }
 
-/**
- * @brief Reads the gyroscope data from the sensor and converts it to 'dps'.
- * @param gyro_data Pointer to an IMU_Data struct to store the converted data.
- */
-void IMU_ReadGyroscopeData(IMU_Data *gyro_data, uint8_t *raw_data) {
-    //uint8_t raw_data[6]; // Buffer to hold 6 bytes for X, Y, Z axes
-    int16_t x_raw, y_raw, z_raw;
-    float sensitivity;
-
-    // Read 6 bytes of data starting from the first gyroscope register
+void IMU_ReadGyroscopeRaw(uint8_t *raw_data) {
     imu_read_register(IMU_GYR_OUT_X_L_REG, raw_data, 6);
+}
 
-    // Combine LSB and MSB to form a signed 16-bit integer for each axis
-    x_raw = (int16_t)((raw_data[1] << 8) | raw_data[0]);
-    y_raw = (int16_t)((raw_data[3] << 8) | raw_data[2]);
-    z_raw = (int16_t)((raw_data[5] << 8) | raw_data[4]);
+/* ====================================================================
+ * DRAIN PATH: DSP Math Only (Safe to call from Ring Buffer)
+ * ==================================================================== */
+void IMU_ConvertAccelRawToFloat(IMU_Data *acc_data, const uint8_t *raw_data) {
+    int16_t x_raw = (int16_t)((raw_data[1] << 8) | raw_data[0]);
+    int16_t y_raw = (int16_t)((raw_data[3] << 8) | raw_data[2]);
+    int16_t z_raw = (int16_t)((raw_data[5] << 8) | raw_data[4]);
 
-    // Get the correct sensitivity factor based on the configured full scale
-    sensitivity = get_gyro_sensitivity(gyroscope_full_scale);
+    //float sensitivity = get_accel_sensitivity(accelerometer_full_scale);
+    float sensitivity = 2.0 / 32767.0;
 
-    // Convert raw data to 'dps' (degrees per second) and store it in the struct
-    gyro_data->x = (float)x_raw * sensitivity;
-    gyro_data->y = (float)y_raw * sensitivity;
-    gyro_data->z = (float)z_raw * sensitivity;
+    acc_data->x = (float)x_raw * 9.81f * sensitivity;
+    acc_data->y = (float)y_raw * 9.81f * sensitivity;
+    acc_data->z = (float)z_raw * 9.81f * sensitivity;
+}
+
+void IMU_ConvertGyroRawToFloat(IMU_Data *gyro_data, const uint8_t *raw_data) {
+    int16_t x_raw = (int16_t)((raw_data[1] << 8) | raw_data[0]);
+    int16_t y_raw = (int16_t)((raw_data[3] << 8) | raw_data[2]);
+    int16_t z_raw = (int16_t)((raw_data[5] << 8) | raw_data[4]);
+
+    //float sensitivity = get_gyro_sensitivity(gyroscope_full_scale);
+    float sensitivity = 1.0 / 175.0;
+
+    gyro_data->x = (float)x_raw * DEG2RAD * sensitivity;
+    gyro_data->y = (float)y_raw * DEG2RAD * sensitivity;
+    gyro_data->z = (float)z_raw * DEG2RAD * sensitivity;
 }
 
 // --- Private Function Implementations (Helper Functions) ---
@@ -209,15 +197,15 @@ static uint8_t imu_write_register(uint8_t reg_addr, uint8_t reg_data) {
  * @param accel_fs The configured full scale macro (e.g., ACC_FS_4G).
  * @return The sensitivity in 'g' per LSB (Least Significant Bit).
  */
-static float get_accel_sensitivity(uint8_t accel_fs) {
-    switch(accel_fs) {
-        case ACC_FS_2G:  return 0.061f / 1000.0f;
-        case ACC_FS_4G:  return 0.122f / 1000.0f;
-        case ACC_FS_8G:  return 0.244f / 1000.0f;
-        case ACC_FS_16G: return 0.488f / 1000.0f;
-        default:         return 0.061f / 1000.0f; // Default to 2g if invalid
-    }
-}
+// static float get_accel_sensitivity(uint8_t accel_fs) {
+//     switch(accel_fs) {
+//         case ACC_FS_2G:  return 0.061f / 1000.0f;
+//         case ACC_FS_4G:  return 0.122f / 1000.0f;
+//         case ACC_FS_8G:  return 0.244f / 1000.0f;
+//         case ACC_FS_16G: return 0.488f / 1000.0f;
+//         default:         return 0.061f / 1000.0f; // Default to 2g if invalid
+//     }
+// }
 
 /**
  * @brief Calculates the correct sensitivity for the gyroscope based on its full scale setting.
@@ -225,12 +213,12 @@ static float get_accel_sensitivity(uint8_t accel_fs) {
  * @param gyro_fs The configured full scale macro (e.g., GYR_FS_250DPS).
  * @return The sensitivity in 'dps' (degrees per second) per LSB.
  */
-static float get_gyro_sensitivity(uint8_t gyro_fs) {
-    switch(gyro_fs) {
-        case GYR_FS_250DPS:  return 8.75f / 1000.0f;
-        case GYR_FS_500DPS:  return 17.50f / 1000.0f;
-        case GYR_FS_1000DPS: return 35.0f / 1000.0f;
-        case GYR_FS_2000DPS: return 70.0f / 1000.0f;
-        default:             return 8.75f / 1000.0f; // Default to 250 dps if invalid
-    }
-}
+// static float get_gyro_sensitivity(uint8_t gyro_fs) {
+//     switch(gyro_fs) {
+//         case GYR_FS_250DPS:  return 8.75f / 1000.0f;
+//         case GYR_FS_500DPS:  return 17.50f / 1000.0f;
+//         case GYR_FS_1000DPS: return 35.0f / 1000.0f;
+//         case GYR_FS_2000DPS: return 70.0f / 1000.0f;
+//         default:             return 8.75f / 1000.0f; // Default to 250 dps if invalid
+//     }
+// }

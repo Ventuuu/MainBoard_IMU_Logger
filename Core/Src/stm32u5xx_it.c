@@ -61,6 +61,7 @@ extern SPI_HandleTypeDef hspi3;
 extern TIM_HandleTypeDef htim2;
 extern UART_HandleTypeDef huart3;
 extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
+extern DMA_HandleTypeDef handle_GPDMA1_Channel0;
 /* USER CODE BEGIN EV */
 extern PCD_HandleTypeDef hpcd_USB_FS;
 /* USER CODE END EV */
@@ -361,5 +362,11 @@ void MDF1_FLT0_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+/**
+  * @brief This function handles GPDMA1 Channel 0 global interrupt.
+  */
+void GPDMA1_Channel0_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&handle_GPDMA1_Channel0);
+}
 /* USER CODE END 1 */

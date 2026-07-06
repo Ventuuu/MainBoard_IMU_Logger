@@ -5849,7 +5849,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
  8002aa4:	492b      	ldr	r1, [pc, #172]	@ (8002b54 <HAL_TIM_PeriodElapsedCallback+0xd0>)
  8002aa6:	2000      	movs	r0, #0
  8002aa8:	f7ff f92a 	bl	8001d00 <BLE_SendPacket>
-        //TODO: Change Gyro function
+
         //BLE_SendPacket(DATA_TYPE_IMU_GYROSCOPE, (uint32_t)gyroscope_data.x);
 
         // Save the raw accelerometer and gyroscope data in memory

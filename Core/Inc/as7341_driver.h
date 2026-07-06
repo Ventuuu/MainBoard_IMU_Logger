@@ -12,6 +12,10 @@
 
 #include <stdint.h>
 
+#ifndef AS7341_ENABLE_SMUX_DIAGNOSTICS
+#define AS7341_ENABLE_SMUX_DIAGNOSTICS 1U
+#endif
+
 /* ---- I2C Address -------------------------------------------------------- */
 #define AS7341_I2C_ADDRESS      0x39U
 #define AS7341_I2C_TIMEOUT      100U
@@ -98,13 +102,52 @@ typedef struct {
 /**
  * @brief Container for a full spectral frame (F1–F8, Clear, NIR).
  *
- * Ordering matches Adafruit convention when using two SMUX configurations:
- *   low:  F1,F2,F3,F4,Clear,NIR  (ch[0..5])
- *   high: F5,F6,F7,F8,Clear,NIR  (ch[6..11])
+ * Public ordering used by the raw logger:
+ *   ch[0..7]  = F1,F2,F3,F4,F5,F6,F7,F8
+ *   ch[8]     = Clear, averaged from the two SMUX phases
+ *   ch[9]     = NIR, averaged from the two SMUX phases
+ *   ch[10..11] keep the unaveraged high-phase Clear/NIR for diagnostics.
  */
 typedef struct {
     uint16_t ch[12];
 } AS7341_Spectrum;
+
+typedef enum {
+    AS7341_ASYNC_ERROR = -1,
+    AS7341_ASYNC_BUSY = 0,
+    AS7341_ASYNC_COMPLETE = 1
+} AS7341_AsyncResult;
+
+#if (AS7341_ENABLE_SMUX_DIAGNOSTICS != 0U)
+extern volatile uint16_t raw_smux_low_ch[6];
+extern volatile uint16_t raw_smux_high_ch[6];
+extern volatile uint16_t final_f1;
+extern volatile uint16_t final_f2;
+extern volatile uint16_t final_f3;
+extern volatile uint16_t final_f4;
+extern volatile uint16_t final_f5;
+extern volatile uint16_t final_f6;
+extern volatile uint16_t final_f7;
+extern volatile uint16_t final_f8;
+extern volatile uint16_t final_clear;
+extern volatile uint16_t final_nir;
+extern volatile uint8_t as7341_diag_enable_before_low_smux;
+extern volatile uint8_t as7341_diag_enable_after_low_smux;
+extern volatile uint8_t as7341_diag_enable_after_low_start;
+extern volatile uint8_t as7341_diag_enable_before_high_smux;
+extern volatile uint8_t as7341_diag_enable_after_high_smux;
+extern volatile uint8_t as7341_diag_enable_after_high_start;
+extern volatile uint8_t as7341_diag_status;
+extern volatile uint8_t as7341_diag_status2;
+extern volatile uint8_t as7341_diag_cfg0;
+extern volatile uint8_t as7341_diag_cfg1;
+extern volatile uint8_t as7341_diag_fden;
+extern volatile uint32_t as7341_diag_smux_timeout_count;
+extern volatile uint32_t as7341_diag_integration_timeout_count;
+extern volatile uint32_t as7341_diag_i2c_error_count;
+extern volatile uint32_t as7341_diag_discarded_sample_count;
+extern volatile uint32_t as7341_diag_completed_acquisition_count;
+#endif
 
 /* ---- Public Function Prototypes ----------------------------------------- */
 
@@ -129,7 +172,7 @@ void AS7341_ConfigTimingAndGain(uint8_t atime, uint16_t astep, AS7341_Gain gain)
 uint8_t AS7341_ReadSixChannels(uint16_t *dst6);
 
 /**
- * @brief Reads a full spectral frame (12 channels: F1–F8, Clear, NIR) using
+ * @brief Reads a full spectral frame (F1–F8, Clear, NIR) using
  *        two SMUX configurations (low and high) inspired by Adafruit.
  *
  * This call is blocking and may take roughly 2× the integration time.
@@ -138,6 +181,12 @@ uint8_t AS7341_ReadSixChannels(uint16_t *dst6);
  * @return 1 on success, 0 on error/timeout.
  */
 uint8_t AS7341_ReadFullSpectrum(AS7341_Spectrum *spectrum);
+
+/** Start a non-blocking two-phase SMUX acquisition. */
+uint8_t AS7341_StartFullSpectrumAsync(AS7341_Spectrum *spectrum);
+
+/** Advance the non-blocking acquisition by one short state-machine step. */
+AS7341_AsyncResult AS7341_ProcessFullSpectrumAsync(uint32_t now_ms);
 
 /**
  * @brief Runs the on-chip flicker engine and returns an equivalent mains

@@ -45,7 +45,8 @@ extern uint8_t bad_blocks2[2048];
 extern uint8_t data_letto[4096];
 extern int exit_flag;
 
-static AppState current_state;
+/* fix 1.2: reference the single AppState variable owned by main.c; declaring a separate static copy causes silent state divergence */
+extern AppState current_state;
 
 // SPI basic functions
 void cs_deselect(void);
@@ -303,8 +304,8 @@ int spi_nand_page_read(read_address_t row, column_address_t column, uint8_t *dat
     uint16_t max_read_len = (SPI_NAND_PAGE_SIZE + SPI_NAND_SPARE_SIZE) - column;
     if (read_len > max_read_len) return SPI_NAND_RET_INVALID_LEN;
 
-    page_read(row, SPI_TIMEOUT);  // read page into flash's internal cache
-    //if (SPI_NAND_RET_OK != ret) return ret;
+    int pr_ret = page_read(row, SPI_TIMEOUT);  /* fix 5.5: capture and propagate ECC/IO errors from page_read */
+    if (SPI_NAND_RET_OK != pr_ret) return pr_ret;
 
     return read_from_cache(column, data_out, read_len, SPI_TIMEOUT);  // read from cache
 }
@@ -316,8 +317,6 @@ int spi_write_read(const uint8_t *write_buff, uint8_t *read_buff, size_t transfe
 	 * write_buff: command, address and data
 	 * read_buff: received data from SPI
 	 */
-	//spi_error_hal =HAL_SPI_Transmit(&hspi2, write_buff, transfer_len, timeout_ms);
-	//spi_error_hal=HAL_SPI_Receive(&hspi2, read_buff, transfer_len, timeout_ms);
 	HAL_SPI_TransmitReceive(&hspi2, write_buff, read_buff, transfer_len, timeout_ms);
 	return SPI_NAND_RET_OK;
 }
@@ -352,7 +351,7 @@ int spi_nand_page_program(read_address_t row, column_address_t column, const uin
     if (SPI_NAND_RET_OK != ret) return ret;
 
     ret = program_load(column, data_in, write_len, SPI_TIMEOUT);
-    //if (SPI_NAND_RET_OK != ret) return ret;
+    if (SPI_NAND_RET_OK != ret) return ret;
 
 
     return program_execute(row, SPI_TIMEOUT);
@@ -395,7 +394,7 @@ int read_from_cache(column_address_t column, uint8_t *data_out, size_t read_len,
                            uint32_t timeout)
 {
 	/** \brief Read from cache operation
-	 * The READ FROM CACHE ×1 command facilitates the sequential reading of
+	 * The READ FROM CACHE x1 command facilitates the sequential reading of
 	 * one or more data bytes from the cache buffer. Initiating the command
 	 * involves driving CS# LOW, shifting in the command opcode 03h/0Bh,
 	 * followed by a 16-bit column address and 8 dummy clocks.
@@ -684,7 +683,8 @@ void cs_deselect(void){
 bool validate_row_address(read_address_t row)
 {
 	/** \brief Ensure that the address block - page is valid */
-    if ((row.block > SPI_NAND_MAX_BLOCK_ADDRESS) || (row.page > SPI_NAND_SPARE_SIZE)) {
+    /* fix 1.1: SPI_NAND_SPARE_SIZE is a byte count (256), not a page index; correct upper bound is SPI_NAND_MAX_PAGE_ADDRESS (63) */
+    if ((row.block > SPI_NAND_MAX_BLOCK_ADDRESS) || (row.page > SPI_NAND_MAX_PAGE_ADDRESS)) {
         return false;
     }
     else {
@@ -709,7 +709,7 @@ int spi_read(uint8_t *read_buff, size_t read_len, uint32_t timeout_ms)
     return SPI_NAND_RET_OK;
 }
 
-int spi_write(uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
+int spi_write(const uint8_t *write_buff, size_t write_len, uint32_t timeout_ms)
 {
 	int r = HAL_SPI_Transmit(&hspi2, write_buff, write_len, timeout_ms);
     return r;
@@ -729,6 +729,7 @@ void write_memory()
 
 		if(b==2048){ // memory full
 			current_state = STATE_IDLE;
+			return; /* fix 1.5: prevent out-of-bounds access on bad_blocks[2048] */
 		}
 
 		// write 1 page at the time
@@ -750,6 +751,7 @@ void write_memory()
 void read_memory_and_transmit()
 {
 		for(int bloc = 0; bloc < 2048; bloc++) { // Cycle on all the memory blocks (2048)
+			if(exit_flag != 0) break; /* fix 4.1: exit outer loop once end-of-data sentinel is found */
 			if(exit_flag == 0){
 			blocco.block = bad_blocks[bloc]; // Read only good blocks
 
@@ -771,8 +773,11 @@ void read_memory_and_transmit()
 				break; // exit cycle
 			}
 
-			CDC_Transmit_FS(data_letto, sizeof(data_letto)); // Send data via USB
-			HAL_Delay(10); // wait some time
+			while(CDC_Transmit_FS(data_letto, sizeof(data_letto)) == USBD_BUSY)
+			{
+				HAL_Delay(1); // wait some time	
+			} // Send data via USB
+			
 		}
 		}
 	}
@@ -780,8 +785,5 @@ void read_memory_and_transmit()
 
 void erase_memory()
 {
-	erase_good_blocks(bad_blocks2); // Erase bad_blocks (set all memory to 0xFF)
+	erase_bad_blocks(bad_blocks2); // Erase bad_blocks (set all memory to 0xFF)
 }
-
-
-
